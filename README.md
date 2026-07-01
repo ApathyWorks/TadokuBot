@@ -1,0 +1,51 @@
+# TadokuBot
+
+A Discord bot that shows [tadoku.app](https://tadoku.app) contest leaderboards. Read-only: all
+scoring data comes live from tadoku.app's public API, the bot doesn't keep its own copy of any
+logs or scores.
+
+## Commands
+
+| Command | Description |
+| --- | --- |
+| `/leaderboard [page] [language] [activity]` | Shows this server's configured contest leaderboard. Falls back to the latest official tadoku.app contest if nothing is configured. |
+| `/set_contest contest:<search>` | **Manage Server** permission required. Picks which contest `/leaderboard` shows for this server, with autocomplete search over tadoku.app's contest list. |
+| `/current_contest` | Shows which contest this server is currently configured to display. |
+
+## Setup
+
+1. Install dependencies:
+   ```
+   pip install -r requirements.txt
+   ```
+2. Create a Discord bot application in the [Discord Developer Portal](https://discord.com/developers/applications), copy its token, and under OAuth2 > URL Generator enable the `bot` and `applications.commands` scopes to generate an invite link. No privileged intents are needed.
+3. Copy `.env.example` to `.env` and paste in the token:
+   ```
+   DISCORD_TOKEN=your_token_here
+   ```
+4. Run it:
+   ```
+   python main.py
+   ```
+
+Slash commands sync globally on startup — it can take a short while for Discord to propagate
+new/changed commands to clients.
+
+## Local state
+
+The only thing persisted locally is `data/config.json`, a per-server mapping of which contest
+`/leaderboard` should display. Everything else (contest details, scores, rankings) is fetched
+live from `https://tadoku.app/api/internal/immersion/`.
+
+## Running tests
+
+```
+pip install -r requirements-dev.txt
+pytest
+```
+
+The suite (`tests/`) covers `lib/tadoku_client.py` against a real local `aiohttp` test server
+(no network calls, no mocking-library version drift), `lib/config_store.py`'s persistence logic,
+and both cogs' command/autocomplete logic by invoking their callbacks directly with a fake
+`discord.Interaction` — no live Discord connection needed. New features should come with tests
+covering their behavior in the same style.
