@@ -1,3 +1,13 @@
+"""Tests for the /leaderboard cog.
+
+Monkeypatches the tadoku client functions with AsyncMocks (the HTTP contract is
+covered separately in test_tadoku_client.py) so these can focus on the cog's
+own logic: contest resolution (pinned vs latest-official fallback), embed
+rendering (medals, ties, filter footer, 1-based paging), the empty-page and
+API-error messages, and the language autocomplete. Cog commands are exercised
+by calling their ``.callback(...)`` directly with a fake interaction.
+"""
+
 from unittest.mock import AsyncMock
 
 import pytest

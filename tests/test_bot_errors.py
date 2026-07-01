@@ -1,3 +1,11 @@
+"""Tests for TadokuBot.on_application_command_error.
+
+Verifies the error-type-to-message mapping (missing permission, cooldown,
+generic fallback), that it uses followup when the response is already done, and
+that a failure to even deliver the error message is swallowed rather than
+propagating.
+"""
+
 from types import SimpleNamespace
 
 import discord

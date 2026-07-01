@@ -1,3 +1,11 @@
+"""Tests for the per-guild JSON config store.
+
+Covers the get/set round-trip, per-guild isolation, overwrite semantics, the
+missing-file default, and the atomic-write guarantee (no leftover temp file).
+The ``isolated_config_store`` autouse fixture points ``_PATH`` at a temp file,
+so these never touch the real data/config.json.
+"""
+
 import json
 import os
 

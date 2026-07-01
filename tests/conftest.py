@@ -1,3 +1,14 @@
+"""Shared pytest fixtures and test doubles for the whole suite.
+
+Provides:
+  * ``isolated_config_store`` -- redirects the JSON store to a temp file so
+    tests never touch (or leak into) the real data/config.json.
+  * ``fake_bot`` / ``make_interaction`` / ``interaction`` -- lightweight
+    stand-ins that let cog callbacks be invoked directly, with no live Discord.
+  * ``FakeTadokuAPI`` / ``tadoku_server`` -- a real loopback HTTP server used to
+    exercise the API client without hitting the network.
+"""
+
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -54,13 +65,19 @@ class FakeTadokuAPI:
     """
 
     def __init__(self):
+        # Canned responses keyed by request path: path -> (status, json body).
         self.responses: dict[str, tuple[int, object]] = {}
+        # Every received request, recorded so tests can assert on the exact path
+        # and query string the client produced.
         self.requests: list[tuple[str, dict]] = []
 
     def set_response(self, path: str, status: int, body: object) -> None:
+        """Register what to return for a given request path."""
         self.responses[path] = (status, body)
 
     async def _handler(self, request: web.Request) -> web.Response:
+        """Single catch-all handler: record the request, reply with the canned
+        response for its path (or a 404 if none was registered)."""
         self.requests.append((request.path, dict(request.query)))
         status, body = self.responses.get(request.path, (404, {"error": "not found"}))
         return web.json_response(body, status=status)
@@ -68,13 +85,21 @@ class FakeTadokuAPI:
 
 @pytest.fixture
 async def tadoku_server(monkeypatch):
+    """Spin up the fake API on a real loopback port and point the client at it.
+
+    Yields the ``FakeTadokuAPI`` so a test can register responses and later
+    inspect captured requests; tears the server down afterwards.
+    """
     fake_api = FakeTadokuAPI()
     app = web.Application()
+    # Route every GET path to the one handler; it dispatches by path internally.
     app.router.add_route("GET", "/{tail:.*}", fake_api._handler)
 
     server = TestServer(app)
     client = TestClient(server)
     await client.start_server()
+    # Redirect the client module's BASE_URL to this server's address so the real
+    # request-building/parsing code runs unchanged against our fake.
     monkeypatch.setattr(tadoku_client, "BASE_URL", str(client.make_url("")).rstrip("/"))
 
     try:

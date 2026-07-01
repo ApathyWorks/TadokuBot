@@ -1,3 +1,12 @@
+"""Tests for the tadoku.app API client.
+
+Drives every client function against the ``tadoku_server`` fixture (a real
+loopback HTTP server), asserting both on the parsed return value and on the
+exact path/query the client sent -- so a wrong URL or a mistyped query param
+fails the test. Also covers the error path (404 -> TadokuAPIError) and the
+bool-to-string query coercion.
+"""
+
 import aiohttp
 import pytest
 

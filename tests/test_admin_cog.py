@@ -1,3 +1,12 @@
+"""Tests for the admin cog (/set_contest, /current_contest).
+
+Monkeypatches the tadoku client with AsyncMocks and covers: contest
+autocomplete (title filtering, name formatting, the 25-item cap, error
+tolerance), /set_contest storing/echoing on success and storing nothing on a
+bad id, the Manage-Server permission check itself, and /current_contest's
+configured-vs-fallback replies.
+"""
+
 from unittest.mock import AsyncMock
 
 import discord
