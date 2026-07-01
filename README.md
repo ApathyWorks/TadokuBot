@@ -9,6 +9,7 @@ logs or scores.
 | Command | Description |
 | --- | --- |
 | `/leaderboard [page] [language] [activity]` | Shows this server's configured contest leaderboard. Falls back to the latest official tadoku.app contest if nothing is configured. |
+| `/score username:<name>` | Looks up one person's rank and score in this server's current contest. `username` is their Tadoku display name; the person must be on that leaderboard (otherwise the bot says they aren't participating). |
 | `/set_contest contest:<search>` | **Manage Server** permission required. Picks which contest `/leaderboard` shows for this server, with autocomplete search over tadoku.app's contest list. |
 | `/current_contest` | Shows which contest this server is currently configured to display. |
 

@@ -21,6 +21,15 @@ MEDALS = {1: "🥇", 2: "🥈", 3: "🥉"}
 # How many leaderboard rows to show per page/embed.
 PAGE_SIZE = 15
 
+# Page size used when scanning the leaderboard for a specific person. The API
+# caps page_size at 100, so this is the largest (and thus fewest-requests) page.
+LOOKUP_PAGE_SIZE = 100
+
+# Safety cap on how many pages /score will scan before giving up. 50 pages of
+# 100 covers 5,000 participants -- far beyond any real contest -- and bounds the
+# worst case so a typo can't trigger an unbounded request loop.
+MAX_LOOKUP_PAGES = 50
+
 # The activity types the API supports, exposed as a fixed dropdown. The values
 # are tadoku.app's activity ids (1 = reading, 2 = listening).
 ACTIVITY_CHOICES = [
@@ -40,6 +49,37 @@ async def _resolve_contest(bot: commands.Bot, guild_id: Optional[int]) -> dict:
     if configured:
         return await tadoku.get_contest(bot.session, configured["contest_id"])
     return await tadoku.get_latest_official_contest(bot.session)
+
+
+def _normalize_name(name: str) -> str:
+    """Fold a display name for comparison: trim surrounding whitespace and
+    casefold. Tadoku display names sometimes carry trailing spaces (e.g.
+    "ruby "), so a naive equality check would miss them."""
+    return name.strip().casefold()
+
+
+async def _find_leaderboard_entry(bot: commands.Bot, contest_id: str, display_name: str) -> Optional[dict]:
+    """Scan a contest's leaderboard for a participant by display name.
+
+    Pages through the leaderboard (100 at a time) and returns the first entry
+    whose display name matches ``display_name`` case-insensitively, or ``None``
+    if the person isn't on this leaderboard at all. Stops as soon as a match is
+    found, at the last page, or at ``MAX_LOOKUP_PAGES`` -- whichever comes first.
+    """
+    target = _normalize_name(display_name)
+    for page in range(MAX_LOOKUP_PAGES):
+        data = await tadoku.get_contest_leaderboard(
+            bot.session, contest_id, page=page, page_size=LOOKUP_PAGE_SIZE
+        )
+        entries = data.get("entries", [])
+        for entry in entries:
+            if _normalize_name(entry["user_display_name"]) == target:
+                return entry
+        # A short (or empty) page means we've reached the end of the leaderboard;
+        # no point requesting further pages.
+        if len(entries) < LOOKUP_PAGE_SIZE:
+            break
+    return None
 
 
 class Leaderboard(commands.Cog):
@@ -160,6 +200,59 @@ class Leaderboard(commands.Cog):
                 f"Page {page} · {data.get('total_size', len(entries))} participants{filter_note}"
             )
         )
+        await interaction.followup.send(embed=embed)
+
+    @app_commands.command(
+        name="score",
+        description="Look up a person's score in this server's current contest.",
+    )
+    @app_commands.describe(
+        username="The person's Tadoku display name, exactly as shown on the leaderboard.",
+    )
+    async def score(self, interaction: discord.Interaction, username: str):
+        """Report one participant's rank and score in the resolved contest.
+
+        The person must actually be on the currently selected leaderboard; if no
+        entry matches ``username`` we say so rather than inventing a zero score.
+        """
+        # Scanning the leaderboard is several network calls in the worst case;
+        # defer so Discord doesn't time the interaction out. Public, like
+        # /leaderboard -- a looked-up score is fine for everyone to see.
+        await interaction.response.defer()
+
+        try:
+            contest = await _resolve_contest(self.bot, interaction.guild_id)
+            entry = await _find_leaderboard_entry(self.bot, contest["id"], username)
+        except tadoku.TadokuAPIError:
+            await interaction.followup.send(
+                "❌ Couldn't reach tadoku.app right now. Try again in a moment."
+            )
+            return
+
+        if entry is None:
+            # The "user has to be in the currently selected leaderboard" case:
+            # not found means they aren't participating in this contest.
+            await interaction.followup.send(
+                f"**{username}** isn't on the leaderboard for **{contest['title']}**."
+            )
+            return
+
+        rank = entry["rank"]
+        # Top 3 get a medal; everyone else a plain "#N".
+        marker = MEDALS.get(rank, f"#{rank}")
+        tie = " *(tie)*" if entry.get("is_tie") else ""
+
+        embed = discord.Embed(
+            title=f"🏆 {contest['title']}",
+            # Show the leaderboard's own spelling of the name (which may differ
+            # in case/spacing from what the user typed), plus rank and score.
+            description=(
+                f"**{entry['user_display_name']}**\n"
+                f"{marker}{tie} — {entry['score']:.1f} points"
+            ),
+            color=discord.Color.blurple(),
+        )
+        embed.set_footer(text=f"{contest['contest_start']} – {contest['contest_end']}")
         await interaction.followup.send(embed=embed)
 
 
