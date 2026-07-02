@@ -65,6 +65,22 @@ ACTIVITY_CHOICES = [
     Choice(name="Listening", value=2),
 ]
 
+# Month dropdown for /monthlyleaderboard; value is the 1-based month number.
+MONTH_CHOICES = [
+    Choice(name="January", value=1),
+    Choice(name="February", value=2),
+    Choice(name="March", value=3),
+    Choice(name="April", value=4),
+    Choice(name="May", value=5),
+    Choice(name="June", value=6),
+    Choice(name="July", value=7),
+    Choice(name="August", value=8),
+    Choice(name="September", value=9),
+    Choice(name="October", value=10),
+    Choice(name="November", value=11),
+    Choice(name="December", value=12),
+]
+
 
 async def _resolve_contest(bot: commands.Bot, guild_id: Optional[int]) -> dict:
     """Return the contest this guild's leaderboard should display.
@@ -120,24 +136,40 @@ def _parse_timestamp(value: str) -> datetime:
     return datetime.fromisoformat(value.replace("Z", "+00:00"))
 
 
-async def _tally_scores_since(bot: commands.Bot, contest_id: str, cutoff: datetime) -> dict[str, list]:
-    """Sum each participant's log scores from ``cutoff`` up to now.
+async def _tally_scores_since(
+    bot: commands.Bot,
+    contest_id: str,
+    cutoff: datetime,
+    until: datetime | None = None,
+) -> dict[str, list]:
+    """Sum each participant's log scores in the window ``[cutoff, until)``.
 
     Pages through the contest's logs (which arrive newest-first) and accumulates
     ``score`` per user for logs on/after ``cutoff``. Because the logs are ordered
     newest-first, the first log older than the cutoff means every remaining log
     is older too, so we stop immediately. Deleted logs are skipped.
 
+    ``until`` is an optional exclusive upper bound: logs at or after it are
+    skipped (used to scope to a *past* calendar month, whose window ends before
+    now). Left ``None`` the window is open-ended up to now. Since logs are
+    newest-first, any too-new logs are seen and skipped before the in-window ones
+    on the same pages.
+
     Returns ``{user_id: [display_name, total_score]}``; the display name is taken
-    from each user's newest log in the window (the first one encountered).
+    from each user's newest log in the window (the first one counted).
     """
     totals: dict[str, list] = {}
     for page in range(MAX_LOG_PAGES):
         logs = await tadoku.list_contest_logs(bot.session, contest_id, page=page, page_size=LOG_PAGE_SIZE)
         for log in logs:
+            created = _parse_timestamp(log["created_at"])
             # Newest-first ordering: once we cross the cutoff we're done entirely.
-            if _parse_timestamp(log["created_at"]) < cutoff:
+            if created < cutoff:
                 return totals
+            # Newer than the window (only possible for a past month) -- skip, but
+            # keep scanning back toward the cutoff.
+            if until is not None and created >= until:
+                continue
             if log.get("deleted"):
                 continue
             uid = log["user_id"]
@@ -422,18 +454,20 @@ class Leaderboard(commands.Cog):
         interaction: discord.Interaction,
         *,
         cutoff: datetime,
+        until: datetime | None = None,
         title_suffix: str,
         window_phrase: str,
     ) -> None:
         """Shared body for /weeklyleaderboard and /monthlyleaderboard.
 
-        Ranks participants by points logged since ``cutoff`` -- tallied from the
-        contest's raw logs, since the API's own leaderboard is only cumulative --
-        and, when the guild's shame setting is on, appends a call-out of
-        participants who have contest points overall but logged nothing in the
-        window. The two commands differ only in the window: ``title_suffix``
-        names it in the embed title, ``window_phrase`` is the prose form used in
-        the footer, the empty-window message and the shame heading.
+        Ranks participants by points logged in the window ``[cutoff, until)`` --
+        tallied from the contest's raw logs, since the API's own leaderboard is
+        only cumulative -- and, when the guild's shame setting is on, appends a
+        call-out of participants who have contest points overall but logged
+        nothing in the window. The commands differ only in the window:
+        ``until`` bounds the top (``None`` = open-ended up to now), ``title_suffix``
+        names it in the embed title, and ``window_phrase`` is the prose form used
+        in the footer, the empty-window message and the shame heading.
         """
         # Tallying logs is several network calls; defer so Discord doesn't time
         # the interaction out. Public, like /leaderboard.
@@ -441,7 +475,7 @@ class Leaderboard(commands.Cog):
 
         try:
             contest = await _resolve_contest(self.bot, interaction.guild_id)
-            totals = await _tally_scores_since(self.bot, contest["id"], cutoff)
+            totals = await _tally_scores_since(self.bot, contest["id"], cutoff, until=until)
         except tadoku.TadokuAPIError:
             await interaction.followup.send(
                 "❌ Couldn't reach tadoku.app right now. Try again in a moment."
@@ -510,22 +544,46 @@ class Leaderboard(commands.Cog):
 
     @app_commands.command(
         name="monthlyleaderboard",
-        description="Ranking of points logged so far this calendar month in this server's contest.",
+        description="Ranking of points logged in a calendar month of this server's contest.",
     )
-    async def monthlyleaderboard(self, interaction: discord.Interaction):
-        """Rank points logged since the start of the current calendar month.
+    @app_commands.describe(
+        month="Which month to show (defaults to the current month).",
+        year="Which year to show (defaults to the current year).",
+    )
+    @app_commands.choices(month=MONTH_CHOICES)
+    async def monthlyleaderboard(
+        self,
+        interaction: discord.Interaction,
+        month: Optional[Choice[int]] = None,
+        year: Optional[app_commands.Range[int, 2000, 2100]] = None,
+    ):
+        """Rank points logged in a calendar month, tallied from the raw logs.
 
-        Like /weeklyleaderboard, but the window runs from the 1st of the current
-        month at 00:00 UTC up to now, tallied from the contest's raw logs.
+        With no arguments this shows the current month to date. ``month`` and/or
+        ``year`` select a specific (e.g. past) month; each defaults to the
+        current one, so ``month:June`` alone means June of the current year. The
+        window runs from the 1st of the chosen month at 00:00 UTC up to the start
+        of the next month.
         """
         now = datetime.now(timezone.utc)
-        # Start of the current calendar month, in UTC (log timestamps are UTC).
-        cutoff = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-        # e.g. "July 2026" -- used for both the title and the prose phrasing.
-        month_label = now.strftime("%B %Y")
+        target_month = month.value if month else now.month
+        target_year = year if year else now.year
+
+        # Window is [start of the chosen month, start of the next month), in UTC
+        # (log timestamps are UTC). For the current month `until` is in the
+        # future, so it excludes nothing -- matching the "so far this month" view.
+        cutoff = datetime(target_year, target_month, 1, tzinfo=timezone.utc)
+        if target_month == 12:
+            until = datetime(target_year + 1, 1, 1, tzinfo=timezone.utc)
+        else:
+            until = datetime(target_year, target_month + 1, 1, tzinfo=timezone.utc)
+        # e.g. "June 2026" -- used for both the title and the prose phrasing.
+        month_label = cutoff.strftime("%B %Y")
+
         await self._send_period_leaderboard(
             interaction,
             cutoff=cutoff,
+            until=until,
             title_suffix=month_label,
             window_phrase=month_label,
         )

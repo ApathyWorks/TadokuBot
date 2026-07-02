@@ -574,6 +574,22 @@ async def test_weekly_tally_display_name_from_newest_log(fake_bot):
     assert totals["u1"][0] == "NewName"
 
 
+async def test_tally_scores_since_skips_logs_at_or_after_until(fake_bot):
+    # A bounded (past-month) window [CUTOFF, until): a newer log is skipped, an
+    # in-window log is counted, and an older-than-cutoff log stops the scan. The
+    # display name comes from the newest *in-window* log, not the skipped one.
+    until = CUTOFF + timedelta(days=30)
+    tadoku_client.list_contest_logs.side_effect = _log_pager({0: [
+        _log("u1", "TooNew", 99, _iso(until + timedelta(hours=1))),     # >= until -> skip
+        _log("u1", "InWindow", 10, _iso(CUTOFF + timedelta(hours=1))),  # in window -> count
+        _log("u2", "TooOld", 50, _iso(CUTOFF - timedelta(seconds=1))),  # < cutoff -> stop
+    ]})
+
+    totals = await leaderboard_cog._tally_scores_since(fake_bot, "c1", CUTOFF, until=until)
+
+    assert totals == {"u1": ["InWindow", 10.0]}
+
+
 def test_rank_weekly_orders_by_score_descending():
     totals = {"u1": ["ruby", 10.0], "u2": ["ryun", 30.0], "u3": ["anja", 20.0]}
 
@@ -831,11 +847,59 @@ async def test_monthly_command_defers(fake_bot):
 
 
 async def test_monthly_command_tallies_from_start_of_month(fake_bot, monkeypatch):
-    # Capture the cutoff the command computes: it must be the 1st of the current
-    # month at 00:00:00 UTC.
+    # With no args the window is the current month: cutoff is the 1st at
+    # 00:00:00 UTC and until is the 1st of next month.
     captured = {}
 
-    async def fake_tally(bot, contest_id, cutoff):
+    async def fake_tally(bot, contest_id, cutoff, until=None):
+        captured["cutoff"] = cutoff
+        captured["until"] = until
+        return {"u1": ["ruby", 5.0]}
+
+    monkeypatch.setattr(leaderboard_cog, "_tally_scores_since", fake_tally)
+    cog = leaderboard_cog.Leaderboard(fake_bot)
+    interaction = make_interaction(guild_id=999)
+
+    await cog.monthlyleaderboard.callback(cog, interaction, month=None, year=None)
+
+    cutoff = captured["cutoff"]
+    now = datetime.now(timezone.utc)
+    assert (cutoff.year, cutoff.month) == (now.year, now.month)
+    assert (cutoff.day, cutoff.hour, cutoff.minute, cutoff.second, cutoff.microsecond) == (1, 0, 0, 0, 0)
+    assert cutoff.tzinfo == timezone.utc
+    # until is the first of the following month.
+    expected_until_month = (now.month % 12) + 1
+    expected_until_year = now.year + (1 if now.month == 12 else 0)
+    assert captured["until"] == datetime(expected_until_year, expected_until_month, 1, tzinfo=timezone.utc)
+
+
+async def test_monthly_command_uses_explicit_month_and_year(fake_bot, monkeypatch):
+    captured = {}
+
+    async def fake_tally(bot, contest_id, cutoff, until=None):
+        captured["cutoff"] = cutoff
+        captured["until"] = until
+        return {"u1": ["ruby", 5.0]}
+
+    monkeypatch.setattr(leaderboard_cog, "_tally_scores_since", fake_tally)
+    cog = leaderboard_cog.Leaderboard(fake_bot)
+    interaction = make_interaction(guild_id=999)
+
+    await cog.monthlyleaderboard.callback(
+        cog, interaction, month=Choice(name="June", value=6), year=2026
+    )
+
+    assert captured["cutoff"] == datetime(2026, 6, 1, tzinfo=timezone.utc)
+    assert captured["until"] == datetime(2026, 7, 1, tzinfo=timezone.utc)
+    embed = interaction.followup.send.await_args.kwargs["embed"]
+    assert "June 2026" in embed.title
+    assert "June 2026" in embed.footer.text
+
+
+async def test_monthly_command_defaults_year_to_current_when_only_month_given(fake_bot, monkeypatch):
+    captured = {}
+
+    async def fake_tally(bot, contest_id, cutoff, until=None):
         captured["cutoff"] = cutoff
         return {"u1": ["ruby", 5.0]}
 
@@ -843,13 +907,30 @@ async def test_monthly_command_tallies_from_start_of_month(fake_bot, monkeypatch
     cog = leaderboard_cog.Leaderboard(fake_bot)
     interaction = make_interaction(guild_id=999)
 
-    await cog.monthlyleaderboard.callback(cog, interaction)
+    await cog.monthlyleaderboard.callback(
+        cog, interaction, month=Choice(name="January", value=1), year=None
+    )
 
-    cutoff = captured["cutoff"]
     now = datetime.now(timezone.utc)
-    assert (cutoff.year, cutoff.month) == (now.year, now.month)
-    assert (cutoff.day, cutoff.hour, cutoff.minute, cutoff.second, cutoff.microsecond) == (1, 0, 0, 0, 0)
-    assert cutoff.tzinfo == timezone.utc
+    assert captured["cutoff"] == datetime(now.year, 1, 1, tzinfo=timezone.utc)
+
+
+async def test_monthly_command_december_until_rolls_into_next_year(fake_bot, monkeypatch):
+    captured = {}
+
+    async def fake_tally(bot, contest_id, cutoff, until=None):
+        captured["until"] = until
+        return {"u1": ["ruby", 5.0]}
+
+    monkeypatch.setattr(leaderboard_cog, "_tally_scores_since", fake_tally)
+    cog = leaderboard_cog.Leaderboard(fake_bot)
+    interaction = make_interaction(guild_id=999)
+
+    await cog.monthlyleaderboard.callback(
+        cog, interaction, month=Choice(name="December", value=12), year=2025
+    )
+
+    assert captured["until"] == datetime(2026, 1, 1, tzinfo=timezone.utc)
 
 
 async def test_monthly_command_renders_ranked_embed(fake_bot):
