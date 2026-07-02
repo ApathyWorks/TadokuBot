@@ -1,15 +1,17 @@
-"""Leaderboard cog: the ``/leaderboard``, ``/score`` and ``/weeklyleaderboard``
-commands.
+"""Leaderboard cog: the ``/leaderboard``, ``/score``, ``/weeklyleaderboard`` and
+``/monthlyleaderboard`` commands.
 
-All three resolve which contest this server should show (a pinned one, or the
+They all resolve which contest this server should show (a pinned one, or the
 latest official as a fallback) and render results as Discord embeds with medal
 emoji for the top three. ``/leaderboard`` and ``/score`` read the contest's
-cumulative ranking; ``/weeklyleaderboard`` instead tallies raw logs from the
-last 7 days to build a rolling window ranking the API doesn't expose directly.
+cumulative ranking; ``/weeklyleaderboard`` and ``/monthlyleaderboard`` instead
+tally raw logs over a window (the last 7 days, or the current calendar month) to
+build the rolling/period rankings the API doesn't expose directly.
 
 When a server has the shame setting on (the default; toggled via ``/shame``),
-``/weeklyleaderboard`` also appends a "shame" call-out naming anyone who has
-points in the contest overall but logged nothing in the last 7 days.
+``/weeklyleaderboard`` and ``/monthlyleaderboard`` also append a "shame"
+call-out naming anyone who has points in the contest overall but logged nothing
+in that command's window.
 """
 
 from datetime import datetime, timedelta, timezone
@@ -116,7 +118,7 @@ def _parse_timestamp(value: str) -> datetime:
     return datetime.fromisoformat(value.replace("Z", "+00:00"))
 
 
-async def _weekly_tally(bot: commands.Bot, contest_id: str, cutoff: datetime) -> dict[str, list]:
+async def _tally_scores_since(bot: commands.Bot, contest_id: str, cutoff: datetime) -> dict[str, list]:
     """Sum each participant's log scores from ``cutoff`` up to now.
 
     Pages through the contest's logs (which arrive newest-first) and accumulates
@@ -147,8 +149,8 @@ async def _weekly_tally(bot: commands.Bot, contest_id: str, cutoff: datetime) ->
     return totals
 
 
-def _rank_weekly(totals: dict[str, list]) -> list[dict]:
-    """Turn ``_weekly_tally`` output into a ranked list of entry dicts.
+def _rank_by_score(totals: dict[str, list]) -> list[dict]:
+    """Turn ``_tally_scores_since`` output into a ranked list of entry dicts.
 
     Sorts by total score descending and assigns standard competition ranks:
     users with an equal total share a rank (rank = 1 + how many scored strictly
@@ -198,7 +200,7 @@ def _shame_slackers(participants: list[dict], totals: dict[str, list]) -> list[s
     """Names of contest participants who have points overall but none this week.
 
     ``participants`` is the cumulative leaderboard (highest score first);
-    ``totals`` is ``_weekly_tally`` output (keyed by user id, values
+    ``totals`` is ``_tally_scores_since`` output (keyed by user id, values
     ``[display_name, score]``). Someone is "shamed" when they appear in the
     cumulative ranking but not in the week's tally. Matching prefers the user id
     and falls back to a normalised display name, so a rename between a person's
@@ -413,6 +415,77 @@ class Leaderboard(commands.Cog):
         embed.set_footer(text=f"{contest['contest_start']} – {contest['contest_end']}")
         await interaction.followup.send(embed=embed)
 
+    async def _send_period_leaderboard(
+        self,
+        interaction: discord.Interaction,
+        *,
+        cutoff: datetime,
+        title_suffix: str,
+        window_phrase: str,
+    ) -> None:
+        """Shared body for /weeklyleaderboard and /monthlyleaderboard.
+
+        Ranks participants by points logged since ``cutoff`` -- tallied from the
+        contest's raw logs, since the API's own leaderboard is only cumulative --
+        and, when the guild's shame setting is on, appends a call-out of
+        participants who have contest points overall but logged nothing in the
+        window. The two commands differ only in the window: ``title_suffix``
+        names it in the embed title, ``window_phrase`` is the prose form used in
+        the footer, the empty-window message and the shame heading.
+        """
+        # Tallying logs is several network calls; defer so Discord doesn't time
+        # the interaction out. Public, like /leaderboard.
+        await interaction.response.defer()
+
+        try:
+            contest = await _resolve_contest(self.bot, interaction.guild_id)
+            totals = await _tally_scores_since(self.bot, contest["id"], cutoff)
+        except tadoku.TadokuAPIError:
+            await interaction.followup.send(
+                "❌ Couldn't reach tadoku.app right now. Try again in a moment."
+            )
+            return
+
+        ranked = _rank_by_score(totals)
+        if not ranked:
+            # Nobody logged anything in the window (e.g. the contest ended before
+            # it, or it's brand new with no logs yet).
+            await interaction.followup.send(
+                f"No points logged in {window_phrase} for **{contest['title']}**."
+            )
+            return
+
+        # Show the top slice; the tally already covers everyone in the window.
+        lines = [_format_entry_line(entry) for entry in ranked[:PAGE_SIZE]]
+        embed = discord.Embed(
+            title=f"🗓️ {contest['title']} — {title_suffix}",
+            description="\n".join(lines),
+            color=discord.Color.blurple(),
+        )
+        shown = min(len(ranked), PAGE_SIZE)
+        embed.set_footer(
+            text=f"Top {shown} of {len(ranked)} · points logged in {window_phrase}"
+        )
+
+        # When enabled for this server (on by default), append a call to shame:
+        # everyone with contest points overall who logged nothing in the window.
+        if config_store.get_guild_shame(interaction.guild_id):
+            try:
+                participants = await _scored_participants(self.bot, contest["id"])
+            except tadoku.TadokuAPIError:
+                # The ranking above already succeeded; a failed shame lookup
+                # shouldn't sink the whole reply, so just skip the section.
+                participants = []
+            slackers = _shame_slackers(participants, totals)
+            if slackers:
+                embed.add_field(
+                    name=f"😤 Shame — logged nothing in {window_phrase}",
+                    value=_format_shame_list(slackers),
+                    inline=False,
+                )
+
+        await interaction.followup.send(embed=embed)
+
     @app_commands.command(
         name="weeklyleaderboard",
         description="Ranking of points logged in the last 7 days of this server's contest.",
@@ -424,61 +497,36 @@ class Leaderboard(commands.Cog):
         "last 7 days" view to fetch -- we tally it ourselves from the individual
         logs and rank users by points earned in the window.
         """
-        # Tallying logs is several network calls; defer so Discord doesn't time
-        # the interaction out. Public, like /leaderboard.
-        await interaction.response.defer()
-
         # Window is the last 7 days ending now, in UTC (log timestamps are UTC).
         cutoff = datetime.now(timezone.utc) - timedelta(days=WEEKLY_WINDOW_DAYS)
-
-        try:
-            contest = await _resolve_contest(self.bot, interaction.guild_id)
-            totals = await _weekly_tally(self.bot, contest["id"], cutoff)
-        except tadoku.TadokuAPIError:
-            await interaction.followup.send(
-                "❌ Couldn't reach tadoku.app right now. Try again in a moment."
-            )
-            return
-
-        ranked = _rank_weekly(totals)
-        if not ranked:
-            # Nobody logged anything in the window (e.g. the contest ended more
-            # than a week ago, or it's brand new with no logs yet).
-            await interaction.followup.send(
-                f"No points logged in the last {WEEKLY_WINDOW_DAYS} days for **{contest['title']}**."
-            )
-            return
-
-        # Show the top slice; the tally already covers everyone in the window.
-        lines = [_format_entry_line(entry) for entry in ranked[:PAGE_SIZE]]
-        embed = discord.Embed(
-            title=f"🗓️ {contest['title']} — last {WEEKLY_WINDOW_DAYS} days",
-            description="\n".join(lines),
-            color=discord.Color.blurple(),
-        )
-        shown = min(len(ranked), PAGE_SIZE)
-        embed.set_footer(
-            text=f"Top {shown} of {len(ranked)} · points logged in the last {WEEKLY_WINDOW_DAYS} days"
+        await self._send_period_leaderboard(
+            interaction,
+            cutoff=cutoff,
+            title_suffix=f"last {WEEKLY_WINDOW_DAYS} days",
+            window_phrase=f"the last {WEEKLY_WINDOW_DAYS} days",
         )
 
-        # When enabled for this server (on by default), append a call to shame:
-        # everyone with contest points overall who logged nothing this week.
-        if config_store.get_guild_shame(interaction.guild_id):
-            try:
-                participants = await _scored_participants(self.bot, contest["id"])
-            except tadoku.TadokuAPIError:
-                # The ranking above already succeeded; a failed shame lookup
-                # shouldn't sink the whole reply, so just skip the section.
-                participants = []
-            slackers = _shame_slackers(participants, totals)
-            if slackers:
-                embed.add_field(
-                    name=f"😤 Shame — logged nothing in {WEEKLY_WINDOW_DAYS} days",
-                    value=_format_shame_list(slackers),
-                    inline=False,
-                )
+    @app_commands.command(
+        name="monthlyleaderboard",
+        description="Ranking of points logged so far this calendar month in this server's contest.",
+    )
+    async def monthlyleaderboard(self, interaction: discord.Interaction):
+        """Rank points logged since the start of the current calendar month.
 
-        await interaction.followup.send(embed=embed)
+        Like /weeklyleaderboard, but the window runs from the 1st of the current
+        month at 00:00 UTC up to now, tallied from the contest's raw logs.
+        """
+        now = datetime.now(timezone.utc)
+        # Start of the current calendar month, in UTC (log timestamps are UTC).
+        cutoff = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        # e.g. "July 2026" -- used for both the title and the prose phrasing.
+        month_label = now.strftime("%B %Y")
+        await self._send_period_leaderboard(
+            interaction,
+            cutoff=cutoff,
+            title_suffix=month_label,
+            window_phrase=month_label,
+        )
 
 
 async def setup(bot: commands.Bot) -> None:

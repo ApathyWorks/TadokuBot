@@ -478,7 +478,7 @@ async def test_score_uses_configured_contest_when_set(fake_bot):
 
 
 # ---------------------------------------------------------------------------
-# _weekly_tally / _rank_weekly (the maths behind /weeklyleaderboard)
+# _tally_scores_since / _rank_by_score (the maths behind the period leaderboards)
 # ---------------------------------------------------------------------------
 
 # A fixed cutoff used by the tally tests; timestamps below are placed relative
@@ -516,7 +516,7 @@ async def test_weekly_tally_sums_scores_per_user_within_window(fake_bot):
         _log("u1", "ruby", 7, inside),
     ]})
 
-    totals = await leaderboard_cog._weekly_tally(fake_bot, "c1", CUTOFF)
+    totals = await leaderboard_cog._tally_scores_since(fake_bot, "c1", CUTOFF)
 
     assert totals["u1"] == ["ruby", 17.0]
     assert totals["u2"] == ["ryun", 5.0]
@@ -531,7 +531,7 @@ async def test_weekly_tally_stops_at_first_log_older_than_cutoff(fake_bot):
         _log("u2", "ryun", 50, _iso(CUTOFF + timedelta(hours=2))),    # never reached
     ]})
 
-    totals = await leaderboard_cog._weekly_tally(fake_bot, "c1", CUTOFF)
+    totals = await leaderboard_cog._tally_scores_since(fake_bot, "c1", CUTOFF)
 
     assert totals == {"u1": ["ruby", 10.0]}
 
@@ -543,7 +543,7 @@ async def test_weekly_tally_skips_deleted_logs(fake_bot):
         _log("u1", "ruby", 100, inside, deleted=True),
     ]})
 
-    totals = await leaderboard_cog._weekly_tally(fake_bot, "c1", CUTOFF)
+    totals = await leaderboard_cog._tally_scores_since(fake_bot, "c1", CUTOFF)
 
     assert totals["u1"] == ["ruby", 10.0]
 
@@ -556,7 +556,7 @@ async def test_weekly_tally_pages_until_short_page(fake_bot):
         1: [_log("late", "latecomer", 3, inside)],
     })
 
-    totals = await leaderboard_cog._weekly_tally(fake_bot, "c1", CUTOFF)
+    totals = await leaderboard_cog._tally_scores_since(fake_bot, "c1", CUTOFF)
 
     assert "late" in totals
     assert tadoku_client.list_contest_logs.await_count == 2
@@ -569,7 +569,7 @@ async def test_weekly_tally_display_name_from_newest_log(fake_bot):
         _log("u1", "OldName", 5, _iso(CUTOFF + timedelta(hours=1))),
     ]})
 
-    totals = await leaderboard_cog._weekly_tally(fake_bot, "c1", CUTOFF)
+    totals = await leaderboard_cog._tally_scores_since(fake_bot, "c1", CUTOFF)
 
     assert totals["u1"][0] == "NewName"
 
@@ -577,7 +577,7 @@ async def test_weekly_tally_display_name_from_newest_log(fake_bot):
 def test_rank_weekly_orders_by_score_descending():
     totals = {"u1": ["ruby", 10.0], "u2": ["ryun", 30.0], "u3": ["anja", 20.0]}
 
-    ranked = leaderboard_cog._rank_weekly(totals)
+    ranked = leaderboard_cog._rank_by_score(totals)
 
     assert [(e["rank"], e["user_display_name"]) for e in ranked] == [
         (1, "ryun"), (2, "anja"), (3, "ruby"),
@@ -587,7 +587,7 @@ def test_rank_weekly_orders_by_score_descending():
 def test_rank_weekly_shares_rank_on_ties_and_skips():
     totals = {"a": ["a", 10.0], "b": ["b", 10.0], "c": ["c", 5.0]}
 
-    ranked = leaderboard_cog._rank_weekly(totals)
+    ranked = leaderboard_cog._rank_by_score(totals)
 
     # Two tied at 10 -> both rank 1 (is_tie), next is rank 3.
     assert ranked[0]["rank"] == 1 and ranked[0]["is_tie"] is True
@@ -596,7 +596,7 @@ def test_rank_weekly_shares_rank_on_ties_and_skips():
 
 
 def test_rank_weekly_empty_is_empty():
-    assert leaderboard_cog._rank_weekly({}) == []
+    assert leaderboard_cog._rank_by_score({}) == []
 
 
 # ---------------------------------------------------------------------------
@@ -813,3 +813,124 @@ async def test_weekly_command_still_renders_when_shame_lookup_fails(fake_bot):
     embed = interaction.followup.send.await_args.kwargs["embed"]
     assert "last 7 days" in embed.title
     assert embed.fields == []
+
+
+# ---------------------------------------------------------------------------
+# /monthlyleaderboard command
+# ---------------------------------------------------------------------------
+
+
+async def test_monthly_command_defers(fake_bot):
+    tadoku_client.list_contest_logs.side_effect = _log_pager({0: _recent_logs(("u1", "ruby", 5))})
+    cog = leaderboard_cog.Leaderboard(fake_bot)
+    interaction = make_interaction(guild_id=999)
+
+    await cog.monthlyleaderboard.callback(cog, interaction)
+
+    interaction.response.defer.assert_awaited_once()
+
+
+async def test_monthly_command_tallies_from_start_of_month(fake_bot, monkeypatch):
+    # Capture the cutoff the command computes: it must be the 1st of the current
+    # month at 00:00:00 UTC.
+    captured = {}
+
+    async def fake_tally(bot, contest_id, cutoff):
+        captured["cutoff"] = cutoff
+        return {"u1": ["ruby", 5.0]}
+
+    monkeypatch.setattr(leaderboard_cog, "_tally_scores_since", fake_tally)
+    cog = leaderboard_cog.Leaderboard(fake_bot)
+    interaction = make_interaction(guild_id=999)
+
+    await cog.monthlyleaderboard.callback(cog, interaction)
+
+    cutoff = captured["cutoff"]
+    now = datetime.now(timezone.utc)
+    assert (cutoff.year, cutoff.month) == (now.year, now.month)
+    assert (cutoff.day, cutoff.hour, cutoff.minute, cutoff.second, cutoff.microsecond) == (1, 0, 0, 0, 0)
+    assert cutoff.tzinfo == timezone.utc
+
+
+async def test_monthly_command_renders_ranked_embed(fake_bot):
+    tadoku_client.list_contest_logs.side_effect = _log_pager({0: _recent_logs(
+        ("u1", "ruby", 30), ("u2", "ryun", 10), ("u3", "anja", 20),
+    )})
+    cog = leaderboard_cog.Leaderboard(fake_bot)
+    interaction = make_interaction(guild_id=999)
+
+    await cog.monthlyleaderboard.callback(cog, interaction)
+
+    embed = interaction.followup.send.await_args.kwargs["embed"]
+    month_label = datetime.now(timezone.utc).strftime("%B %Y")
+    assert month_label in embed.title
+    lines = embed.description.split("\n")
+    assert lines[0] == "🥇 ruby — 30.0"   # highest monthly total
+    assert lines[1] == "🥈 anja — 20.0"
+    assert lines[2] == "🥉 ryun — 10.0"
+    assert "3 of 3" in embed.footer.text
+    assert month_label in embed.footer.text
+
+
+async def test_monthly_command_reports_empty_window(fake_bot):
+    tadoku_client.list_contest_logs.side_effect = _log_pager({0: []})
+    cog = leaderboard_cog.Leaderboard(fake_bot)
+    interaction = make_interaction(guild_id=999)
+
+    await cog.monthlyleaderboard.callback(cog, interaction)
+
+    args, kwargs = interaction.followup.send.await_args
+    assert "embed" not in kwargs
+    assert "No points logged" in args[0]
+    assert "2026 Round 4" in args[0]
+
+
+async def test_monthly_command_appends_shame_field_for_slackers(fake_bot):
+    tadoku_client.list_contest_logs.side_effect = _log_pager({0: _recent_logs(("u1", "ruby", 30))})
+    tadoku_client.get_contest_leaderboard.side_effect = _pager({0: [
+        _entry(1, "ruby", 100.0),
+        _entry(2, "slacker", 40.0),
+    ]})
+    cog = leaderboard_cog.Leaderboard(fake_bot)
+    interaction = make_interaction(guild_id=999)  # shame on by default
+
+    await cog.monthlyleaderboard.callback(cog, interaction)
+
+    embed = interaction.followup.send.await_args.kwargs["embed"]
+    shame_fields = [f for f in embed.fields if "Shame" in f.name]
+    assert shame_fields
+    assert "slacker" in shame_fields[0].value
+    assert "ruby" not in shame_fields[0].value
+
+
+async def test_monthly_command_uses_same_shame_toggle_as_weekly(fake_bot):
+    # The /shame toggle is shared: turning it off suppresses the monthly section
+    # too (and skips the cumulative leaderboard fetch entirely).
+    config_store.set_guild_shame(999, False)
+    tadoku_client.list_contest_logs.side_effect = _log_pager({0: _recent_logs(("u1", "ruby", 30))})
+    tadoku_client.get_contest_leaderboard.side_effect = _pager({0: [
+        _entry(1, "ruby", 100.0),
+        _entry(2, "slacker", 40.0),
+    ]})
+    cog = leaderboard_cog.Leaderboard(fake_bot)
+    interaction = make_interaction(guild_id=999)
+
+    await cog.monthlyleaderboard.callback(cog, interaction)
+
+    embed = interaction.followup.send.await_args.kwargs["embed"]
+    assert embed.fields == []
+    tadoku_client.get_contest_leaderboard.assert_not_called()
+
+
+async def test_monthly_command_uses_configured_contest(fake_bot):
+    config_store.set_guild_contest(999, "configured-id", "Configured Contest")
+    tadoku_client.list_contest_logs.side_effect = _log_pager({0: _recent_logs(("u1", "ruby", 5))})
+    cog = leaderboard_cog.Leaderboard(fake_bot)
+    interaction = make_interaction(guild_id=999)
+
+    await cog.monthlyleaderboard.callback(cog, interaction)
+
+    called_contest_id = tadoku_client.list_contest_logs.await_args.args[1]
+    assert called_contest_id == "configured-id"
+    embed = interaction.followup.send.await_args.kwargs["embed"]
+    assert "Configured Contest" in embed.title
