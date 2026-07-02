@@ -6,6 +6,10 @@ latest official as a fallback) and render results as Discord embeds with medal
 emoji for the top three. ``/leaderboard`` and ``/score`` read the contest's
 cumulative ranking; ``/weeklyleaderboard`` instead tallies raw logs from the
 last 7 days to build a rolling window ranking the API doesn't expose directly.
+
+When a server has the shame setting on (the default; toggled via ``/shame``),
+``/weeklyleaderboard`` also appends a "shame" call-out naming anyone who has
+points in the contest overall but logged nothing in the last 7 days.
 """
 
 from datetime import datetime, timedelta, timezone
@@ -36,6 +40,11 @@ MAX_LOOKUP_PAGES = 50
 
 # The rolling window /weeklyleaderboard tallies over.
 WEEKLY_WINDOW_DAYS = 7
+
+# Most names to spell out in the /weeklyleaderboard shame list before collapsing
+# the rest into an "…and N more" tail (keeps the embed field within Discord's
+# 1024-char limit and readable).
+SHAME_LIST_LIMIT = 15
 
 # Page size for fetching contest logs (the API caps this at 100).
 LOG_PAGE_SIZE = 100
@@ -157,6 +166,71 @@ def _rank_weekly(totals: dict[str, list]) -> list[dict]:
             {"rank": rank, "user_display_name": name, "score": total, "is_tie": is_tie}
         )
     return ranked
+
+
+async def _scored_participants(bot: commands.Bot, contest_id: str) -> list[dict]:
+    """Return every leaderboard entry with a positive cumulative score.
+
+    Pages the contest's cumulative leaderboard (100 at a time). Because it's
+    sorted by score descending, the first non-positive score means everyone
+    after it also has zero, so we stop there; a short page ends the scan too.
+    Bounded by ``MAX_LOOKUP_PAGES`` like the ``/score`` scan so a huge contest
+    can't trigger an unbounded request loop.
+    """
+    participants: list[dict] = []
+    for page in range(MAX_LOOKUP_PAGES):
+        data = await tadoku.get_contest_leaderboard(
+            bot.session, contest_id, page=page, page_size=LOOKUP_PAGE_SIZE
+        )
+        entries = data.get("entries", [])
+        for entry in entries:
+            # Sorted descending: a zero (or negative) score means we've passed
+            # everyone who actually has points.
+            if entry["score"] <= 0:
+                return participants
+            participants.append(entry)
+        if len(entries) < LOOKUP_PAGE_SIZE:
+            break
+    return participants
+
+
+def _shame_slackers(participants: list[dict], totals: dict[str, list]) -> list[str]:
+    """Names of contest participants who have points overall but none this week.
+
+    ``participants`` is the cumulative leaderboard (highest score first);
+    ``totals`` is ``_weekly_tally`` output (keyed by user id, values
+    ``[display_name, score]``). Someone is "shamed" when they appear in the
+    cumulative ranking but not in the week's tally. Matching prefers the user id
+    and falls back to a normalised display name, so a rename between a person's
+    log and the leaderboard doesn't wrongly shame them. Returned in
+    cumulative-rank order -- the higher you rank while slacking, the more
+    shameful.
+    """
+    active_ids = set(totals.keys())
+    active_names = {_normalize_name(name) for name, _ in totals.values()}
+    slackers = []
+    for entry in participants:
+        uid = entry.get("user_id")
+        if uid is not None and uid in active_ids:
+            continue
+        if _normalize_name(entry["user_display_name"]) in active_names:
+            continue
+        slackers.append(entry["user_display_name"])
+    return slackers
+
+
+def _format_shame_list(names: list[str]) -> str:
+    """Render the shame names as a single comma-separated string.
+
+    Shows at most ``SHAME_LIST_LIMIT`` names and collapses any overflow into an
+    "…and N more" tail so the embed field stays within Discord's size limit.
+    """
+    shown = names[:SHAME_LIST_LIMIT]
+    listed = ", ".join(shown)
+    remaining = len(names) - len(shown)
+    if remaining > 0:
+        listed += f", …and {remaining} more"
+    return listed
 
 
 def _format_entry_line(entry: dict) -> str:
@@ -386,6 +460,24 @@ class Leaderboard(commands.Cog):
         embed.set_footer(
             text=f"Top {shown} of {len(ranked)} · points logged in the last {WEEKLY_WINDOW_DAYS} days"
         )
+
+        # When enabled for this server (on by default), append a call to shame:
+        # everyone with contest points overall who logged nothing this week.
+        if config_store.get_guild_shame(interaction.guild_id):
+            try:
+                participants = await _scored_participants(self.bot, contest["id"])
+            except tadoku.TadokuAPIError:
+                # The ranking above already succeeded; a failed shame lookup
+                # shouldn't sink the whole reply, so just skip the section.
+                participants = []
+            slackers = _shame_slackers(participants, totals)
+            if slackers:
+                embed.add_field(
+                    name=f"😤 Shame — logged nothing in {WEEKLY_WINDOW_DAYS} days",
+                    value=_format_shame_list(slackers),
+                    inline=False,
+                )
+
         await interaction.followup.send(embed=embed)
 
 

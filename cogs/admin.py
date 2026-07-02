@@ -1,13 +1,17 @@
-"""Admin cog: commands for configuring which contest a server displays.
+"""Admin cog: commands for configuring per-server behaviour.
 
-Two slash commands:
+Slash commands:
   * ``/set_contest`` -- pin this server's ``/leaderboard`` to a specific
     contest (Manage Server permission required), with name autocomplete.
   * ``/current_contest`` -- report which contest is currently pinned.
+  * ``/shame`` -- toggle (Manage Server) whether ``/weeklyleaderboard`` appends
+    its call-out of members who have contest points but logged nothing this week.
 
-The per-server pin is persisted via ``lib.config_store``; everything else is
+Per-server settings are persisted via ``lib.config_store``; everything else is
 looked up live from tadoku.app.
 """
+
+from typing import Optional
 
 import discord
 from discord import app_commands
@@ -117,6 +121,41 @@ class Admin(commands.Cog):
                 "latest official tadoku.app contest. Use `/set_contest` to pick a specific one.",
                 ephemeral=True,
             )
+
+    @app_commands.command(
+        name="shame",
+        description="Toggle /weeklyleaderboard's call-out of members who logged nothing this week.",
+    )
+    @app_commands.describe(
+        enabled="On adds the shame list to /weeklyleaderboard; off hides it. Omit to see the current setting.",
+    )
+    @app_commands.guild_only()
+    # Server-wide behaviour change, so gate it like /set_contest.
+    @app_commands.checks.has_permissions(manage_guild=True)
+    async def shame(self, interaction: discord.Interaction, enabled: Optional[bool] = None):
+        """Turn this server's ``/weeklyleaderboard`` shame list on or off.
+
+        With no ``enabled`` argument this just reports the current setting; pass
+        ``True``/``False`` to change it. The setting defaults to on. Purely local
+        state, so no defer/network call -- reply immediately and ephemerally.
+        """
+        if enabled is None:
+            # No argument: report the current state without changing anything.
+            current = config_store.get_guild_shame(interaction.guild_id)
+            state = "on" if current else "off"
+            await interaction.response.send_message(
+                f"The `/weeklyleaderboard` shame list is currently **{state}** for this server. "
+                "Use `/shame enabled:True` or `/shame enabled:False` to change it.",
+                ephemeral=True,
+            )
+            return
+
+        config_store.set_guild_shame(interaction.guild_id, enabled)
+        state = "on" if enabled else "off"
+        await interaction.response.send_message(
+            f"✅ The `/weeklyleaderboard` shame list is now **{state}** for this server.",
+            ephemeral=True,
+        )
 
 
 async def setup(bot: commands.Bot) -> None:

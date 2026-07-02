@@ -6,8 +6,17 @@ store is a single JSON object keyed by Discord guild id (as a string, since
 JSON object keys are always strings):
 
     {
-      "123456789": {"contest_id": "<uuid>", "contest_title": "2026 Round 4"}
+      "123456789": {
+        "contest_id": "<uuid>",
+        "contest_title": "2026 Round 4",
+        "shame": true
+      }
     }
+
+Each guild's keys are independent: pinning a contest and toggling the
+``/weeklyleaderboard`` shame list are separate settings that don't clobber
+each other. ``shame`` is absent until a guild toggles it (the feature is on by
+default).
 
 Writes are done to a temp file and atomically renamed into place, so a crash
 partway through a write can never leave a half-written / corrupt config.json.
@@ -55,7 +64,14 @@ def get_guild_contest(guild_id: int) -> dict | None:
     latest official contest.
     """
     # JSON keys are strings, so look up by the stringified guild id.
-    return _read().get(str(guild_id))
+    entry = _read().get(str(guild_id))
+    # A guild may have an entry with only other settings (e.g. the shame
+    # toggle) and no contest pinned -- that still counts as "unset" here, so
+    # callers fall back to the latest-official contest rather than crashing on a
+    # missing contest_id.
+    if not entry or "contest_id" not in entry:
+        return None
+    return entry
 
 
 def set_guild_contest(guild_id: int, contest_id: str, contest_title: str) -> None:
@@ -64,8 +80,41 @@ def set_guild_contest(guild_id: int, contest_id: str, contest_title: str) -> Non
     We store the title alongside the id so ``/current_contest`` can name the
     contest without an extra API round-trip.
     """
-    # Read-modify-write the whole object: load current state, update this one
-    # guild's entry, write it all back atomically.
+    # Read-modify-write the whole object: load current state, update just this
+    # guild's contest keys (preserving any others, e.g. the shame toggle), and
+    # write it all back atomically.
     data = _read()
-    data[str(guild_id)] = {"contest_id": contest_id, "contest_title": contest_title}
+    entry = data.get(str(guild_id), {})
+    entry["contest_id"] = contest_id
+    entry["contest_title"] = contest_title
+    data[str(guild_id)] = entry
+    _write(data)
+
+
+def get_guild_shame(guild_id: int) -> bool:
+    """Whether ``/weeklyleaderboard`` appends its "shame" list for this guild.
+
+    Defaults to ``True`` (on) for any guild that has never toggled it, matching
+    the feature's default-on behaviour. A ``None`` guild id (a DM) has no stored
+    setting either, so it also gets the default.
+    """
+    entry = _read().get(str(guild_id))
+    if not entry:
+        return True
+    # Older entries written before this setting existed have no "shame" key;
+    # treat their absence as the on-by-default state.
+    return entry.get("shame", True)
+
+
+def set_guild_shame(guild_id: int, enabled: bool) -> None:
+    """Turn the ``/weeklyleaderboard`` shame list on/off for ``guild_id``.
+
+    Stored alongside (not replacing) any pinned contest, so toggling shame never
+    clears ``/set_contest`` and vice versa.
+    """
+    # Read-modify-write, preserving the guild's other keys (e.g. contest pin).
+    data = _read()
+    entry = data.get(str(guild_id), {})
+    entry["shame"] = enabled
+    data[str(guild_id)] = entry
     _write(data)

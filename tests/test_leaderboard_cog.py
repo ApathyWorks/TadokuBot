@@ -675,3 +675,141 @@ async def test_weekly_command_uses_configured_contest(fake_bot):
     assert called_contest_id == "configured-id"
     embed = interaction.followup.send.await_args.kwargs["embed"]
     assert "Configured Contest" in embed.title
+
+
+# ---------------------------------------------------------------------------
+# shame helpers (_scored_participants / _shame_slackers / _format_shame_list)
+# ---------------------------------------------------------------------------
+
+
+async def test_scored_participants_collects_positive_scores_and_stops_at_zero(fake_bot):
+    # Leaderboard is score-descending, so the first zero ends the scan; entries
+    # after it (including later zeros) are never collected.
+    tadoku_client.get_contest_leaderboard.side_effect = _pager({0: [
+        _entry(1, "ruby", 100.0),
+        _entry(2, "ryun", 50.0),
+        _entry(3, "ghost", 0.0),
+        _entry(4, "also-ghost", 0.0),
+    ]})
+
+    participants = await leaderboard_cog._scored_participants(fake_bot, "c1")
+
+    assert [p["user_display_name"] for p in participants] == ["ruby", "ryun"]
+
+
+async def test_scored_participants_pages_until_short_page(fake_bot):
+    tadoku_client.get_contest_leaderboard.side_effect = _pager({
+        0: _full_page(1),
+        1: [_entry(101, "late", 5.0)],
+    })
+
+    participants = await leaderboard_cog._scored_participants(fake_bot, "c1")
+
+    assert len(participants) == leaderboard_cog.LOOKUP_PAGE_SIZE + 1
+    assert tadoku_client.get_contest_leaderboard.await_count == 2
+
+
+def test_shame_slackers_lists_participants_absent_from_weekly_totals():
+    participants = [_entry(1, "ruby", 100.0), _entry(2, "ryun", 50.0), _entry(3, "anja", 10.0)]
+    totals = {"u1": ["ruby", 20.0]}  # only ruby logged this week
+
+    # ruby matched by user id and dropped; the rest kept in cumulative-rank order.
+    assert leaderboard_cog._shame_slackers(participants, totals) == ["ryun", "anja"]
+
+
+def test_shame_slackers_matches_by_display_name_when_ids_differ():
+    # Same person logged under a different user id but the same name -> not shamed.
+    participants = [_entry(1, "Ruby ", 100.0)]
+    totals = {"different-id": ["ruby", 5.0]}
+
+    assert leaderboard_cog._shame_slackers(participants, totals) == []
+
+
+def test_shame_slackers_empty_when_everyone_logged():
+    participants = [_entry(1, "ruby", 100.0)]
+    totals = {"u1": ["ruby", 5.0]}
+
+    assert leaderboard_cog._shame_slackers(participants, totals) == []
+
+
+def test_format_shame_list_joins_names():
+    assert leaderboard_cog._format_shame_list(["a", "b", "c"]) == "a, b, c"
+
+
+def test_format_shame_list_caps_and_summarises_overflow():
+    names = [f"n{i}" for i in range(leaderboard_cog.SHAME_LIST_LIMIT + 3)]
+
+    out = leaderboard_cog._format_shame_list(names)
+
+    assert out.startswith("n0, n1")
+    assert "…and 3 more" in out
+    # Only SHAME_LIST_LIMIT names are spelled out.
+    assert f"n{leaderboard_cog.SHAME_LIST_LIMIT}" not in out
+
+
+# ---------------------------------------------------------------------------
+# /weeklyleaderboard shame section
+# ---------------------------------------------------------------------------
+
+
+async def test_weekly_command_appends_shame_field_for_slackers(fake_bot):
+    # ruby logged this week; slacker has contest points but nothing this week.
+    tadoku_client.list_contest_logs.side_effect = _log_pager({0: _recent_logs(("u1", "ruby", 30))})
+    tadoku_client.get_contest_leaderboard.side_effect = _pager({0: [
+        _entry(1, "ruby", 100.0),
+        _entry(2, "slacker", 40.0),
+    ]})
+    cog = leaderboard_cog.Leaderboard(fake_bot)
+    interaction = make_interaction(guild_id=999)  # shame on by default
+
+    await cog.weeklyleaderboard.callback(cog, interaction)
+
+    embed = interaction.followup.send.await_args.kwargs["embed"]
+    shame_fields = [f for f in embed.fields if "Shame" in f.name]
+    assert shame_fields
+    assert "slacker" in shame_fields[0].value
+    assert "ruby" not in shame_fields[0].value
+
+
+async def test_weekly_command_omits_shame_field_when_disabled(fake_bot):
+    config_store.set_guild_shame(999, False)
+    tadoku_client.list_contest_logs.side_effect = _log_pager({0: _recent_logs(("u1", "ruby", 30))})
+    tadoku_client.get_contest_leaderboard.side_effect = _pager({0: [
+        _entry(1, "ruby", 100.0),
+        _entry(2, "slacker", 40.0),
+    ]})
+    cog = leaderboard_cog.Leaderboard(fake_bot)
+    interaction = make_interaction(guild_id=999)
+
+    await cog.weeklyleaderboard.callback(cog, interaction)
+
+    embed = interaction.followup.send.await_args.kwargs["embed"]
+    assert embed.fields == []
+    # With shame off we don't even fetch the cumulative leaderboard.
+    tadoku_client.get_contest_leaderboard.assert_not_called()
+
+
+async def test_weekly_command_omits_shame_field_when_no_slackers(fake_bot):
+    tadoku_client.list_contest_logs.side_effect = _log_pager({0: _recent_logs(("u1", "ruby", 30))})
+    tadoku_client.get_contest_leaderboard.side_effect = _pager({0: [_entry(1, "ruby", 100.0)]})
+    cog = leaderboard_cog.Leaderboard(fake_bot)
+    interaction = make_interaction(guild_id=999)
+
+    await cog.weeklyleaderboard.callback(cog, interaction)
+
+    embed = interaction.followup.send.await_args.kwargs["embed"]
+    assert embed.fields == []
+
+
+async def test_weekly_command_still_renders_when_shame_lookup_fails(fake_bot):
+    tadoku_client.list_contest_logs.side_effect = _log_pager({0: _recent_logs(("u1", "ruby", 30))})
+    tadoku_client.get_contest_leaderboard.side_effect = tadoku_client.TadokuAPIError("boom")
+    cog = leaderboard_cog.Leaderboard(fake_bot)
+    interaction = make_interaction(guild_id=999)
+
+    await cog.weeklyleaderboard.callback(cog, interaction)
+
+    # The main ranking (from logs) still went out; only the shame section is skipped.
+    embed = interaction.followup.send.await_args.kwargs["embed"]
+    assert "last 7 days" in embed.title
+    assert embed.fields == []

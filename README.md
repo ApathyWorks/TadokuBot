@@ -10,9 +10,10 @@ logs or scores.
 | --- | --- |
 | `/leaderboard [page] [language] [activity]` | Shows this server's configured contest leaderboard. Falls back to the latest official tadoku.app contest if nothing is configured. |
 | `/score username:<name>` | Looks up one person's rank and score in this server's current contest. `username` is their Tadoku display name; the person must be on that leaderboard (otherwise the bot says they aren't participating). |
-| `/weeklyleaderboard` | Ranks everyone by points logged in the **last 7 days** of this server's current contest. Tallied from the contest's individual logs (the API's own leaderboard is cumulative), so it's a rolling window ending now. |
+| `/weeklyleaderboard` | Ranks everyone by points logged in the **last 7 days** of this server's current contest. Tallied from the contest's individual logs (the API's own leaderboard is cumulative), so it's a rolling window ending now. When the shame setting is on (default), it also appends a call-out of everyone who has points in the contest but logged nothing in the last 7 days. |
 | `/set_contest contest:<search>` | **Manage Server** permission required. Picks which contest `/leaderboard` shows for this server, with autocomplete search over tadoku.app's contest list. |
 | `/current_contest` | Shows which contest this server is currently configured to display. |
+| `/shame [enabled]` | **Manage Server** permission required. Turns the `/weeklyleaderboard` shame call-out on or off for this server (default **on**). Run without `enabled` to see the current setting. |
 
 ## Setup
 
@@ -35,9 +36,10 @@ new/changed commands to clients.
 
 ## Local state
 
-The only thing persisted locally is `data/config.json`, a per-server mapping of which contest
-`/leaderboard` should display. Everything else (contest details, scores, rankings) is fetched
-live from `https://tadoku.app/api/internal/immersion/`.
+The only thing persisted locally is `data/config.json`, a per-server mapping of settings: which
+contest `/leaderboard` should display and whether the `/weeklyleaderboard` shame call-out is on.
+Everything else (contest details, scores, rankings) is fetched live from
+`https://tadoku.app/api/internal/immersion/`.
 
 ## Running tests
 

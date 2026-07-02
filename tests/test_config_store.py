@@ -57,3 +57,44 @@ def test_file_contents_are_valid_json_keyed_by_guild_id_string():
         data = json.load(f)
 
     assert data == {"555": {"contest_id": "contest-a", "contest_title": "Contest A"}}
+
+
+# ---------------------------------------------------------------------------
+# shame toggle
+# ---------------------------------------------------------------------------
+
+
+def test_get_guild_shame_defaults_to_true_when_unset():
+    assert config_store.get_guild_shame(12345) is True
+
+
+def test_set_then_get_shame_round_trip():
+    config_store.set_guild_shame(12345, False)
+    assert config_store.get_guild_shame(12345) is False
+
+    config_store.set_guild_shame(12345, True)
+    assert config_store.get_guild_shame(12345) is True
+
+
+def test_shame_defaults_true_for_guild_with_only_a_contest_set():
+    # A guild pinned before this setting existed has no "shame" key; it should
+    # still read as on.
+    config_store.set_guild_contest(1, "contest-a", "Contest A")
+
+    assert config_store.get_guild_shame(1) is True
+
+
+def test_setting_shame_preserves_the_pinned_contest():
+    config_store.set_guild_contest(1, "contest-a", "Contest A")
+    config_store.set_guild_shame(1, False)
+
+    assert config_store.get_guild_contest(1)["contest_id"] == "contest-a"
+    assert config_store.get_guild_shame(1) is False
+
+
+def test_setting_contest_preserves_the_shame_toggle():
+    config_store.set_guild_shame(1, False)
+    config_store.set_guild_contest(1, "contest-a", "Contest A")
+
+    assert config_store.get_guild_shame(1) is False
+    assert config_store.get_guild_contest(1)["contest_id"] == "contest-a"

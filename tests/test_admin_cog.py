@@ -150,3 +150,73 @@ async def test_current_contest_reports_fallback_when_unconfigured(fake_bot):
     args, kwargs = interaction.response.send_message.await_args
     assert "No contest configured" in args[0]
     assert kwargs.get("ephemeral") is True
+
+
+# ---------------------------------------------------------------------------
+# /shame
+# ---------------------------------------------------------------------------
+
+
+async def test_shame_reports_default_on_when_never_set(fake_bot):
+    cog = admin_cog.Admin(fake_bot)
+    interaction = make_interaction(guild_id=999)
+
+    await cog.shame.callback(cog, interaction, enabled=None)
+
+    args, kwargs = interaction.response.send_message.await_args
+    assert "on" in args[0]
+    assert kwargs.get("ephemeral") is True
+    # Reporting must not change the stored state.
+    assert config_store.get_guild_shame(999) is True
+
+
+async def test_shame_reports_current_off_state(fake_bot):
+    config_store.set_guild_shame(999, False)
+    cog = admin_cog.Admin(fake_bot)
+    interaction = make_interaction(guild_id=999)
+
+    await cog.shame.callback(cog, interaction, enabled=None)
+
+    args, kwargs = interaction.response.send_message.await_args
+    assert "off" in args[0]
+
+
+async def test_shame_turns_off_and_confirms(fake_bot):
+    cog = admin_cog.Admin(fake_bot)
+    interaction = make_interaction(guild_id=999)
+
+    await cog.shame.callback(cog, interaction, enabled=False)
+
+    assert config_store.get_guild_shame(999) is False
+    args, kwargs = interaction.response.send_message.await_args
+    assert "off" in args[0]
+    assert kwargs.get("ephemeral") is True
+
+
+async def test_shame_turns_back_on_and_confirms(fake_bot):
+    config_store.set_guild_shame(999, False)
+    cog = admin_cog.Admin(fake_bot)
+    interaction = make_interaction(guild_id=999)
+
+    await cog.shame.callback(cog, interaction, enabled=True)
+
+    assert config_store.get_guild_shame(999) is True
+    args, kwargs = interaction.response.send_message.await_args
+    assert "on" in args[0]
+
+
+async def test_shame_requires_manage_guild_permission():
+    interaction = make_interaction(guild_id=999)
+    interaction.permissions = discord.Permissions.none()
+
+    [predicate] = admin_cog.Admin.shame.checks
+    with pytest.raises(MissingPermissions):
+        predicate(interaction)
+
+
+async def test_shame_permission_check_passes_with_manage_guild():
+    interaction = make_interaction(guild_id=999)
+    interaction.permissions = discord.Permissions(manage_guild=True)
+
+    [predicate] = admin_cog.Admin.shame.checks
+    assert predicate(interaction) is True
