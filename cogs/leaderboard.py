@@ -51,10 +51,12 @@ SHAME_LIST_LIMIT = 15
 # Page size for fetching contest logs (the API caps this at 100).
 LOG_PAGE_SIZE = 100
 
-# Safety cap on log pages fetched for the weekly tally. Logs are newest-first
-# and we stop as soon as we pass the 7-day cutoff, so in practice only the
-# first few pages are read; this just bounds a pathological case.
-MAX_LOG_PAGES = 100
+# Safety cap on log pages fetched for a period tally (weekly/monthly). Logs are
+# newest-first and we stop as soon as we pass the window's cutoff, so in practice
+# only the first few pages are read; this just bounds a pathological case. Set
+# generously (1000 pages x 100 = 100k logs) so even a busy contest's full month
+# is covered before the cap can undercount the oldest days.
+MAX_LOG_PAGES = 1000
 
 # The activity types the API supports, exposed as a fixed dropdown. The values
 # are tadoku.app's activity ids (1 = reading, 2 = listening).
