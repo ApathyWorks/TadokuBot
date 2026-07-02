@@ -1,10 +1,14 @@
-"""Leaderboard cog: the user-facing ``/leaderboard`` command.
+"""Leaderboard cog: the ``/leaderboard``, ``/score`` and ``/weeklyleaderboard``
+commands.
 
-Resolves which contest this server should show (a pinned one, or the latest
-official as a fallback), fetches a page of its ranking from tadoku.app, and
-renders it as a Discord embed with medal emoji for the top three.
+All three resolve which contest this server should show (a pinned one, or the
+latest official as a fallback) and render results as Discord embeds with medal
+emoji for the top three. ``/leaderboard`` and ``/score`` read the contest's
+cumulative ranking; ``/weeklyleaderboard`` instead tallies raw logs from the
+last 7 days to build a rolling window ranking the API doesn't expose directly.
 """
 
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import discord
@@ -29,6 +33,17 @@ LOOKUP_PAGE_SIZE = 100
 # 100 covers 5,000 participants -- far beyond any real contest -- and bounds the
 # worst case so a typo can't trigger an unbounded request loop.
 MAX_LOOKUP_PAGES = 50
+
+# The rolling window /weeklyleaderboard tallies over.
+WEEKLY_WINDOW_DAYS = 7
+
+# Page size for fetching contest logs (the API caps this at 100).
+LOG_PAGE_SIZE = 100
+
+# Safety cap on log pages fetched for the weekly tally. Logs are newest-first
+# and we stop as soon as we pass the 7-day cutoff, so in practice only the
+# first few pages are read; this just bounds a pathological case.
+MAX_LOG_PAGES = 100
 
 # The activity types the API supports, exposed as a fixed dropdown. The values
 # are tadoku.app's activity ids (1 = reading, 2 = listening).
@@ -80,6 +95,82 @@ async def _find_leaderboard_entry(bot: commands.Bot, contest_id: str, display_na
         if len(entries) < LOOKUP_PAGE_SIZE:
             break
     return None
+
+
+def _parse_timestamp(value: str) -> datetime:
+    """Parse a tadoku.app ISO-8601 timestamp into a timezone-aware datetime.
+
+    The API returns UTC times with a trailing ``Z`` (e.g. "2026-07-01T22:56:46.1Z");
+    swapping ``Z`` for ``+00:00`` makes ``fromisoformat`` produce a UTC-aware
+    value that can be compared against the cutoff safely.
+    """
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
+async def _weekly_tally(bot: commands.Bot, contest_id: str, cutoff: datetime) -> dict[str, list]:
+    """Sum each participant's log scores from ``cutoff`` up to now.
+
+    Pages through the contest's logs (which arrive newest-first) and accumulates
+    ``score`` per user for logs on/after ``cutoff``. Because the logs are ordered
+    newest-first, the first log older than the cutoff means every remaining log
+    is older too, so we stop immediately. Deleted logs are skipped.
+
+    Returns ``{user_id: [display_name, total_score]}``; the display name is taken
+    from each user's newest log in the window (the first one encountered).
+    """
+    totals: dict[str, list] = {}
+    for page in range(MAX_LOG_PAGES):
+        logs = await tadoku.list_contest_logs(bot.session, contest_id, page=page, page_size=LOG_PAGE_SIZE)
+        for log in logs:
+            # Newest-first ordering: once we cross the cutoff we're done entirely.
+            if _parse_timestamp(log["created_at"]) < cutoff:
+                return totals
+            if log.get("deleted"):
+                continue
+            uid = log["user_id"]
+            if uid not in totals:
+                # First (newest) log for this user sets the display name.
+                totals[uid] = [log.get("user_display_name", "Unknown"), 0.0]
+            totals[uid][1] += log["score"]
+        # A short/empty page is the end of the log history.
+        if len(logs) < LOG_PAGE_SIZE:
+            break
+    return totals
+
+
+def _rank_weekly(totals: dict[str, list]) -> list[dict]:
+    """Turn ``_weekly_tally`` output into a ranked list of entry dicts.
+
+    Sorts by total score descending and assigns standard competition ranks:
+    users with an equal total share a rank (rank = 1 + how many scored strictly
+    higher), and ``is_tie`` flags any total shared by more than one user.
+    Each entry mirrors the leaderboard API shape
+    (``rank``/``user_display_name``/``score``/``is_tie``) so rendering is uniform.
+    """
+    rows = sorted(totals.values(), key=lambda r: r[1], reverse=True)
+    scores = [total for _, total in rows]
+    ranked = []
+    for name, total in rows:
+        rank = 1 + sum(1 for s in scores if s > total)
+        is_tie = scores.count(total) > 1
+        ranked.append(
+            {"rank": rank, "user_display_name": name, "score": total, "is_tie": is_tie}
+        )
+    return ranked
+
+
+def _format_entry_line(entry: dict) -> str:
+    """Render one ranked entry as an embed line: medal-or-#N, name, score, tie.
+
+    Shared by /leaderboard and /weeklyleaderboard so both use identical
+    formatting: a medal for the top three (else a right-aligned monospace "#N"
+    so numbers line up), the display name, the one-decimal score, and an
+    italic "(tie)" marker when the entry ties another.
+    """
+    rank = entry["rank"]
+    marker = MEDALS.get(rank, f"`#{rank:>3}`")
+    tie = " *(tie)*" if entry.get("is_tie") else ""
+    return f"{marker} {entry['user_display_name']} — {entry['score']:.1f}{tie}"
 
 
 class Leaderboard(commands.Cog):
@@ -169,15 +260,8 @@ class Leaderboard(commands.Cog):
             )
             return
 
-        # Build one text line per ranked entry.
-        lines = []
-        for entry in entries:
-            rank = entry["rank"]
-            # Top 3 get a medal; everyone else a right-aligned "#N" in monospace
-            # so the numbers line up in the embed.
-            marker = MEDALS.get(rank, f"`#{rank:>3}`")
-            tie = " *(tie)*" if entry.get("is_tie") else ""
-            lines.append(f"{marker} {entry['user_display_name']} — {entry['score']:.1f}{tie}")
+        # Build one text line per ranked entry (shared formatting with /weeklyleaderboard).
+        lines = [_format_entry_line(entry) for entry in entries]
 
         # Summarise any active filters for the footer, e.g. "(language: jpa, activity: Reading)".
         filters = []
@@ -253,6 +337,55 @@ class Leaderboard(commands.Cog):
             color=discord.Color.blurple(),
         )
         embed.set_footer(text=f"{contest['contest_start']} – {contest['contest_end']}")
+        await interaction.followup.send(embed=embed)
+
+    @app_commands.command(
+        name="weeklyleaderboard",
+        description="Ranking of points logged in the last 7 days of this server's contest.",
+    )
+    async def weeklyleaderboard(self, interaction: discord.Interaction):
+        """Build a rolling 7-day ranking from the contest's raw logs.
+
+        The contest leaderboard the API serves is cumulative, so there's no
+        "last 7 days" view to fetch -- we tally it ourselves from the individual
+        logs and rank users by points earned in the window.
+        """
+        # Tallying logs is several network calls; defer so Discord doesn't time
+        # the interaction out. Public, like /leaderboard.
+        await interaction.response.defer()
+
+        # Window is the last 7 days ending now, in UTC (log timestamps are UTC).
+        cutoff = datetime.now(timezone.utc) - timedelta(days=WEEKLY_WINDOW_DAYS)
+
+        try:
+            contest = await _resolve_contest(self.bot, interaction.guild_id)
+            totals = await _weekly_tally(self.bot, contest["id"], cutoff)
+        except tadoku.TadokuAPIError:
+            await interaction.followup.send(
+                "❌ Couldn't reach tadoku.app right now. Try again in a moment."
+            )
+            return
+
+        ranked = _rank_weekly(totals)
+        if not ranked:
+            # Nobody logged anything in the window (e.g. the contest ended more
+            # than a week ago, or it's brand new with no logs yet).
+            await interaction.followup.send(
+                f"No points logged in the last {WEEKLY_WINDOW_DAYS} days for **{contest['title']}**."
+            )
+            return
+
+        # Show the top slice; the tally already covers everyone in the window.
+        lines = [_format_entry_line(entry) for entry in ranked[:PAGE_SIZE]]
+        embed = discord.Embed(
+            title=f"🗓️ {contest['title']} — last {WEEKLY_WINDOW_DAYS} days",
+            description="\n".join(lines),
+            color=discord.Color.blurple(),
+        )
+        shown = min(len(ranked), PAGE_SIZE)
+        embed.set_footer(
+            text=f"Top {shown} of {len(ranked)} · points logged in the last {WEEKLY_WINDOW_DAYS} days"
+        )
         await interaction.followup.send(embed=embed)
 
 

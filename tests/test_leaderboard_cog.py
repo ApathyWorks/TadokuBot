@@ -8,6 +8,7 @@ API-error messages, and the language autocomplete. Cog commands are exercised
 by calling their ``.callback(...)`` directly with a fake interaction.
 """
 
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock
 
 import pytest
@@ -42,6 +43,7 @@ def patched_tadoku(monkeypatch):
         "get_contest_leaderboard",
         AsyncMock(return_value={"entries": [], "total_size": 0}),
     )
+    monkeypatch.setattr(tadoku_client, "list_contest_logs", AsyncMock(return_value=[]))
     return tadoku_client
 
 
@@ -473,3 +475,203 @@ async def test_score_uses_configured_contest_when_set(fake_bot):
     assert called_contest_id == "configured-id"
     embed = interaction.followup.send.await_args.kwargs["embed"]
     assert embed.title == "🏆 Configured Contest"
+
+
+# ---------------------------------------------------------------------------
+# _weekly_tally / _rank_weekly (the maths behind /weeklyleaderboard)
+# ---------------------------------------------------------------------------
+
+# A fixed cutoff used by the tally tests; timestamps below are placed relative
+# to it so "inside" vs "outside" the window is explicit and deterministic.
+CUTOFF = datetime(2026, 7, 1, tzinfo=timezone.utc)
+
+
+def _iso(dt: datetime) -> str:
+    """Render a datetime as the API's Z-suffixed UTC timestamp."""
+    return dt.strftime("%Y-%m-%dT%H:%M:%S") + "Z"
+
+
+def _log(user_id, name, score, created_at, deleted=False):
+    return {
+        "user_id": user_id,
+        "user_display_name": name,
+        "score": score,
+        "created_at": created_at,
+        "deleted": deleted,
+    }
+
+
+def _log_pager(pages):
+    """side_effect serving {page_number: [logs]} for list_contest_logs."""
+    def _serve(session, contest_id, *, page, page_size):
+        return pages.get(page, [])
+    return _serve
+
+
+async def test_weekly_tally_sums_scores_per_user_within_window(fake_bot):
+    inside = _iso(CUTOFF + timedelta(hours=1))
+    tadoku_client.list_contest_logs.side_effect = _log_pager({0: [
+        _log("u1", "ruby", 10, inside),
+        _log("u2", "ryun", 5, inside),
+        _log("u1", "ruby", 7, inside),
+    ]})
+
+    totals = await leaderboard_cog._weekly_tally(fake_bot, "c1", CUTOFF)
+
+    assert totals["u1"] == ["ruby", 17.0]
+    assert totals["u2"] == ["ryun", 5.0]
+
+
+async def test_weekly_tally_stops_at_first_log_older_than_cutoff(fake_bot):
+    # Newest-first order: a log before the cutoff ends the scan, so the older
+    # in-list entry after it is never counted even though it's the same user.
+    tadoku_client.list_contest_logs.side_effect = _log_pager({0: [
+        _log("u1", "ruby", 10, _iso(CUTOFF + timedelta(hours=1))),
+        _log("u1", "ruby", 99, _iso(CUTOFF - timedelta(seconds=1))),  # older -> stop here
+        _log("u2", "ryun", 50, _iso(CUTOFF + timedelta(hours=2))),    # never reached
+    ]})
+
+    totals = await leaderboard_cog._weekly_tally(fake_bot, "c1", CUTOFF)
+
+    assert totals == {"u1": ["ruby", 10.0]}
+
+
+async def test_weekly_tally_skips_deleted_logs(fake_bot):
+    inside = _iso(CUTOFF + timedelta(hours=1))
+    tadoku_client.list_contest_logs.side_effect = _log_pager({0: [
+        _log("u1", "ruby", 10, inside),
+        _log("u1", "ruby", 100, inside, deleted=True),
+    ]})
+
+    totals = await leaderboard_cog._weekly_tally(fake_bot, "c1", CUTOFF)
+
+    assert totals["u1"] == ["ruby", 10.0]
+
+
+async def test_weekly_tally_pages_until_short_page(fake_bot):
+    inside = _iso(CUTOFF + timedelta(hours=1))
+    full_page = [_log(f"u{i}", f"user{i}", 1, inside) for i in range(leaderboard_cog.LOG_PAGE_SIZE)]
+    tadoku_client.list_contest_logs.side_effect = _log_pager({
+        0: full_page,
+        1: [_log("late", "latecomer", 3, inside)],
+    })
+
+    totals = await leaderboard_cog._weekly_tally(fake_bot, "c1", CUTOFF)
+
+    assert "late" in totals
+    assert tadoku_client.list_contest_logs.await_count == 2
+
+
+async def test_weekly_tally_display_name_from_newest_log(fake_bot):
+    # The user renamed themselves; the newest (first) log should win.
+    tadoku_client.list_contest_logs.side_effect = _log_pager({0: [
+        _log("u1", "NewName", 5, _iso(CUTOFF + timedelta(hours=2))),
+        _log("u1", "OldName", 5, _iso(CUTOFF + timedelta(hours=1))),
+    ]})
+
+    totals = await leaderboard_cog._weekly_tally(fake_bot, "c1", CUTOFF)
+
+    assert totals["u1"][0] == "NewName"
+
+
+def test_rank_weekly_orders_by_score_descending():
+    totals = {"u1": ["ruby", 10.0], "u2": ["ryun", 30.0], "u3": ["anja", 20.0]}
+
+    ranked = leaderboard_cog._rank_weekly(totals)
+
+    assert [(e["rank"], e["user_display_name"]) for e in ranked] == [
+        (1, "ryun"), (2, "anja"), (3, "ruby"),
+    ]
+
+
+def test_rank_weekly_shares_rank_on_ties_and_skips():
+    totals = {"a": ["a", 10.0], "b": ["b", 10.0], "c": ["c", 5.0]}
+
+    ranked = leaderboard_cog._rank_weekly(totals)
+
+    # Two tied at 10 -> both rank 1 (is_tie), next is rank 3.
+    assert ranked[0]["rank"] == 1 and ranked[0]["is_tie"] is True
+    assert ranked[1]["rank"] == 1 and ranked[1]["is_tie"] is True
+    assert ranked[2]["rank"] == 3 and ranked[2]["is_tie"] is False
+
+
+def test_rank_weekly_empty_is_empty():
+    assert leaderboard_cog._rank_weekly({}) == []
+
+
+# ---------------------------------------------------------------------------
+# /weeklyleaderboard command
+# ---------------------------------------------------------------------------
+
+def _recent_logs(*rows):
+    """Logs timestamped 'now' so they always fall inside the command's real
+    (now - 7 days) window regardless of when the test runs."""
+    now = _iso(datetime.now(timezone.utc))
+    return [_log(uid, name, score, now) for uid, name, score in rows]
+
+
+async def test_weekly_command_defers(fake_bot):
+    tadoku_client.list_contest_logs.side_effect = _log_pager({0: _recent_logs(("u1", "ruby", 5))})
+    cog = leaderboard_cog.Leaderboard(fake_bot)
+    interaction = make_interaction(guild_id=999)
+
+    await cog.weeklyleaderboard.callback(cog, interaction)
+
+    interaction.response.defer.assert_awaited_once()
+
+
+async def test_weekly_command_renders_ranked_embed(fake_bot):
+    tadoku_client.list_contest_logs.side_effect = _log_pager({0: _recent_logs(
+        ("u1", "ruby", 30), ("u2", "ryun", 10), ("u3", "anja", 20),
+    )})
+    cog = leaderboard_cog.Leaderboard(fake_bot)
+    interaction = make_interaction(guild_id=999)
+
+    await cog.weeklyleaderboard.callback(cog, interaction)
+
+    embed = interaction.followup.send.await_args.kwargs["embed"]
+    assert "last 7 days" in embed.title
+    lines = embed.description.split("\n")
+    assert lines[0] == "🥇 ruby — 30.0"   # highest weekly total
+    assert lines[1] == "🥈 anja — 20.0"
+    assert lines[2] == "🥉 ryun — 10.0"
+    assert "3 of 3" in embed.footer.text
+
+
+async def test_weekly_command_reports_empty_window(fake_bot):
+    tadoku_client.list_contest_logs.side_effect = _log_pager({0: []})
+    cog = leaderboard_cog.Leaderboard(fake_bot)
+    interaction = make_interaction(guild_id=999)
+
+    await cog.weeklyleaderboard.callback(cog, interaction)
+
+    args, kwargs = interaction.followup.send.await_args
+    assert "embed" not in kwargs
+    assert "No points logged" in args[0]
+    assert "2026 Round 4" in args[0]
+
+
+async def test_weekly_command_sends_friendly_message_on_api_error(fake_bot):
+    tadoku_client.list_contest_logs.side_effect = tadoku_client.TadokuAPIError("boom")
+    cog = leaderboard_cog.Leaderboard(fake_bot)
+    interaction = make_interaction(guild_id=999)
+
+    await cog.weeklyleaderboard.callback(cog, interaction)
+
+    args, kwargs = interaction.followup.send.await_args
+    assert "embed" not in kwargs
+    assert "tadoku.app" in args[0]
+
+
+async def test_weekly_command_uses_configured_contest(fake_bot):
+    config_store.set_guild_contest(999, "configured-id", "Configured Contest")
+    tadoku_client.list_contest_logs.side_effect = _log_pager({0: _recent_logs(("u1", "ruby", 5))})
+    cog = leaderboard_cog.Leaderboard(fake_bot)
+    interaction = make_interaction(guild_id=999)
+
+    await cog.weeklyleaderboard.callback(cog, interaction)
+
+    called_contest_id = tadoku_client.list_contest_logs.await_args.args[1]
+    assert called_contest_id == "configured-id"
+    embed = interaction.followup.send.await_args.kwargs["embed"]
+    assert "Configured Contest" in embed.title

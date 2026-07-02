@@ -140,3 +140,27 @@ async def get_contest_leaderboard(
             "activity_id": activity_id,
         },
     )
+
+
+async def list_contest_logs(
+    session: aiohttp.ClientSession,
+    contest_id: str,
+    *,
+    page: int = 0,
+    page_size: int = 100,
+) -> list[dict]:
+    """Fetch one page of a contest's individual logs, newest first.
+
+    Each log carries ``user_id``, ``user_display_name``, ``score``,
+    ``created_at`` (an ISO-8601 UTC timestamp) and ``deleted``. The API returns
+    logs in descending ``created_at`` order and pages backward in time, which is
+    what lets ``/weeklyleaderboard`` stop early once it reaches logs older than
+    its 7-day window. Returns the bare list (the API's pagination envelope is
+    unwrapped here).
+    """
+    data = await _get(
+        session,
+        f"/contests/{contest_id}/logs",
+        {"page": page, "page_size": page_size},
+    )
+    return data.get("logs", [])

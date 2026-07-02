@@ -117,3 +117,28 @@ async def test_list_contests_defaults_to_empty_list_when_key_missing(tadoku_serv
         contests = await tadoku.list_contests(session)
 
     assert contests == []
+
+
+async def test_list_contest_logs_returns_logs_and_sends_paging(tadoku_server):
+    tadoku_server.set_response(
+        "/contests/abc-123/logs",
+        200,
+        {"logs": [{"user_id": "u1", "score": 6, "created_at": "2026-07-01T22:56:46Z"}], "total_size": 1},
+    )
+
+    async with aiohttp.ClientSession() as session:
+        logs = await tadoku.list_contest_logs(session, "abc-123", page=2, page_size=100)
+
+    assert logs[0]["user_id"] == "u1"
+    [(path, query)] = tadoku_server.requests
+    assert path == "/contests/abc-123/logs"
+    assert query == {"page": "2", "page_size": "100"}
+
+
+async def test_list_contest_logs_defaults_to_empty_list_when_key_missing(tadoku_server):
+    tadoku_server.set_response("/contests/abc-123/logs", 200, {})
+
+    async with aiohttp.ClientSession() as session:
+        logs = await tadoku.list_contest_logs(session, "abc-123")
+
+    assert logs == []

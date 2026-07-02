@@ -10,6 +10,7 @@ logs or scores.
 | --- | --- |
 | `/leaderboard [page] [language] [activity]` | Shows this server's configured contest leaderboard. Falls back to the latest official tadoku.app contest if nothing is configured. |
 | `/score username:<name>` | Looks up one person's rank and score in this server's current contest. `username` is their Tadoku display name; the person must be on that leaderboard (otherwise the bot says they aren't participating). |
+| `/weeklyleaderboard` | Ranks everyone by points logged in the **last 7 days** of this server's current contest. Tallied from the contest's individual logs (the API's own leaderboard is cumulative), so it's a rolling window ending now. |
 | `/set_contest contest:<search>` | **Manage Server** permission required. Picks which contest `/leaderboard` shows for this server, with autocomplete search over tadoku.app's contest list. |
 | `/current_contest` | Shows which contest this server is currently configured to display. |
 
