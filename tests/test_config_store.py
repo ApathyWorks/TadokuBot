@@ -9,6 +9,8 @@ so these never touch the real data/config.json.
 import json
 import os
 
+import pytest
+
 import lib.config_store as config_store
 
 
@@ -98,3 +100,85 @@ def test_setting_contest_preserves_the_shame_toggle():
 
     assert config_store.get_guild_shame(1) is False
     assert config_store.get_guild_contest(1)["contest_id"] == "contest-a"
+
+
+# ---------------------------------------------------------------------------
+# wrap-up alerts
+# ---------------------------------------------------------------------------
+
+
+def test_get_guild_alert_defaults_when_unset():
+    assert config_store.get_guild_alert(12345, "weekly") == {
+        "enabled": False,
+        "channel_id": None,
+        "last_period": None,
+    }
+
+
+def test_set_and_get_alert_round_trip():
+    config_store.set_guild_alert(1, "weekly", enabled=True, channel_id=42, last_period=[2026, 27])
+
+    assert config_store.get_guild_alert(1, "weekly") == {
+        "enabled": True,
+        "channel_id": 42,
+        "last_period": [2026, 27],
+    }
+
+
+def test_set_alert_merges_partial_updates():
+    config_store.set_guild_alert(1, "monthly", enabled=True, channel_id=99)
+    # A later update of just last_period must keep enabled/channel_id.
+    config_store.set_guild_alert(1, "monthly", last_period=[2026, 6])
+
+    assert config_store.get_guild_alert(1, "monthly") == {
+        "enabled": True,
+        "channel_id": 99,
+        "last_period": [2026, 6],
+    }
+
+
+def test_weekly_and_monthly_alerts_are_independent():
+    config_store.set_guild_alert(1, "weekly", enabled=True, channel_id=1)
+    config_store.set_guild_alert(1, "monthly", enabled=False, channel_id=2)
+
+    assert config_store.get_guild_alert(1, "weekly")["enabled"] is True
+    assert config_store.get_guild_alert(1, "monthly")["enabled"] is False
+    assert config_store.get_guild_alert(1, "weekly")["channel_id"] == 1
+    assert config_store.get_guild_alert(1, "monthly")["channel_id"] == 2
+
+
+def test_alerts_preserve_contest_and_shame():
+    config_store.set_guild_contest(1, "contest-a", "Contest A")
+    config_store.set_guild_shame(1, False)
+    config_store.set_guild_alert(1, "weekly", enabled=True, channel_id=7)
+
+    assert config_store.get_guild_contest(1)["contest_id"] == "contest-a"
+    assert config_store.get_guild_shame(1) is False
+    assert config_store.get_guild_alert(1, "weekly")["channel_id"] == 7
+
+
+def test_setting_contest_preserves_alerts():
+    config_store.set_guild_alert(1, "weekly", enabled=True, channel_id=7)
+    config_store.set_guild_contest(1, "contest-a", "Contest A")
+
+    assert config_store.get_guild_alert(1, "weekly")["enabled"] is True
+
+
+def test_guilds_with_alerts_lists_only_configured_guilds():
+    config_store.set_guild_contest(1, "contest-a", "Contest A")  # no alerts
+    config_store.set_guild_alert(2, "weekly", enabled=True, channel_id=1)
+    config_store.set_guild_alert(3, "monthly", enabled=False, channel_id=2)
+
+    assert sorted(config_store.guilds_with_alerts()) == [2, 3]
+
+
+def test_alert_accessors_reject_unknown_kind():
+    with pytest.raises(ValueError):
+        config_store.get_guild_alert(1, "daily")
+    with pytest.raises(ValueError):
+        config_store.set_guild_alert(1, "daily", enabled=True)
+
+
+def test_set_alert_rejects_unknown_field():
+    with pytest.raises(ValueError):
+        config_store.set_guild_alert(1, "weekly", bogus=True)

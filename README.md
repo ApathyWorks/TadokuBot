@@ -15,6 +15,8 @@ logs or scores.
 | `/set_contest contest:<search>` | **Manage Server** permission required. Picks which contest `/leaderboard` shows for this server, with autocomplete search over tadoku.app's contest list. |
 | `/current_contest` | Shows which contest this server is currently configured to display. |
 | `/shame [enabled]` | **Manage Server** permission required. Turns the shame call-out on `/weeklyleaderboard` and `/monthlyleaderboard` on or off for this server (default **on**). Run without `enabled` to see the current setting. |
+| `/weekly_wrapup [enabled] [channel]` | **Manage Server** permission required. Turns the automatic **weekly wrap-up** on or off. When on, the bot posts the weekly leaderboard to the chosen channel (or the channel the command was run in) at the start of each week. Run without `enabled` to see the current setting. |
+| `/monthly_wrapup [enabled] [channel]` | **Manage Server** permission required. Turns the automatic **monthly wrap-up** on or off. When on, the bot posts the previous month's leaderboard to the chosen channel on the 1st of each month. Run without `enabled` to see the current setting. |
 
 ## Setup
 
@@ -38,7 +40,8 @@ new/changed commands to clients.
 ## Local state
 
 The only thing persisted locally is `data/config.json`, a per-server mapping of settings: which
-contest `/leaderboard` should display and whether the `/weeklyleaderboard` shame call-out is on.
+contest `/leaderboard` should display, whether the shame call-out is on, and each server's
+weekly/monthly wrap-up alert settings (enabled, target channel, and the last period posted).
 Everything else (contest details, scores, rankings) is fetched live from
 `https://tadoku.app/api/internal/immersion/`.
 
@@ -51,6 +54,7 @@ pytest
 
 The suite (`tests/`) covers `lib/tadoku_client.py` against a real local `aiohttp` test server
 (no network calls, no mocking-library version drift), `lib/config_store.py`'s persistence logic,
-and both cogs' command/autocomplete logic by invoking their callbacks directly with a fake
-`discord.Interaction` — no live Discord connection needed. New features should come with tests
-covering their behavior in the same style.
+and every cog's command/autocomplete logic by invoking their callbacks directly with a fake
+`discord.Interaction` — no live Discord connection needed. The wrap-up scheduler is driven
+directly with a fixed "now" (no reliance on the wall clock or a live loop). New features should
+come with tests covering their behavior in the same style.

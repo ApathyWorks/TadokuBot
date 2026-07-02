@@ -118,3 +118,63 @@ def set_guild_shame(guild_id: int, enabled: bool) -> None:
     entry["shame"] = enabled
     data[str(guild_id)] = entry
     _write(data)
+
+
+# The two automatic wrap-up alerts, each configured independently per guild.
+ALERT_KINDS = ("weekly", "monthly")
+
+
+def get_guild_alert(guild_id: int, kind: str) -> dict:
+    """Return a guild's settings for the ``kind`` ("weekly"/"monthly") wrap-up.
+
+    Always returns a dict with all three keys so callers never have to guard for
+    absence:
+
+      * ``enabled``     -- whether the alert posts automatically (default False).
+      * ``channel_id``  -- the channel to post in (int), or ``None`` if unset.
+      * ``last_period`` -- the last period already posted, as ``[year, week]``
+        (weekly) or ``[year, month]`` (monthly), or ``None`` if never posted.
+        The scheduler uses this to fire once per period and to avoid re-posting.
+    """
+    if kind not in ALERT_KINDS:
+        raise ValueError(f"unknown alert kind: {kind!r}")
+    entry = _read().get(str(guild_id)) or {}
+    settings = (entry.get("alerts") or {}).get(kind) or {}
+    return {
+        "enabled": settings.get("enabled", False),
+        "channel_id": settings.get("channel_id"),
+        "last_period": settings.get("last_period"),
+    }
+
+
+def set_guild_alert(guild_id: int, kind: str, **fields) -> None:
+    """Update some of a guild's ``kind`` wrap-up settings, leaving the rest as-is.
+
+    Accepts any of ``enabled`` / ``channel_id`` / ``last_period`` as keyword
+    args and merges them into the stored settings, preserving the guild's other
+    keys (contest pin, shame toggle, the other alert kind). This partial-update
+    shape lets the scheduler bump only ``last_period`` without disturbing the
+    admin's ``enabled``/``channel_id`` choices.
+    """
+    if kind not in ALERT_KINDS:
+        raise ValueError(f"unknown alert kind: {kind!r}")
+    unknown = set(fields) - {"enabled", "channel_id", "last_period"}
+    if unknown:
+        raise ValueError(f"unknown alert field(s): {sorted(unknown)}")
+    data = _read()
+    entry = data.get(str(guild_id), {})
+    alerts = entry.setdefault("alerts", {})
+    alerts.setdefault(kind, {}).update(fields)
+    data[str(guild_id)] = entry
+    _write(data)
+
+
+def guilds_with_alerts() -> list[int]:
+    """Return the ids of guilds that have any wrap-up alert configured.
+
+    Lets the scheduler iterate just the guilds it might need to post for,
+    without loading or reasoning about every stored guild. Only guilds with an
+    ``alerts`` section are returned (whether enabled or not -- the caller checks
+    ``enabled`` per kind).
+    """
+    return [int(gid) for gid, entry in _read().items() if entry.get("alerts")]

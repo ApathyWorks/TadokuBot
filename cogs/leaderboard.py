@@ -283,6 +283,70 @@ def _format_entry_line(entry: dict) -> str:
     return f"{marker} {entry['user_display_name']} — {entry['score']:.1f}{tie}"
 
 
+async def build_period_leaderboard_embed(
+    bot: commands.Bot,
+    guild_id: Optional[int],
+    *,
+    cutoff: datetime,
+    until: datetime | None = None,
+    title_suffix: str,
+    window_phrase: str,
+) -> tuple[dict, Optional[discord.Embed]]:
+    """Resolve the guild's contest and render a period ranking as an embed.
+
+    Shared by the ``/weeklyleaderboard`` / ``/monthlyleaderboard`` commands and
+    the automatic wrap-up alerts (``cogs.alerts``). Ranks participants by points
+    logged in the window ``[cutoff, until)`` (tallied from raw logs, since the
+    API's own leaderboard is only cumulative) and, when the guild's shame setting
+    is on, appends the "shame" call-out. ``title_suffix`` names the window in the
+    title; ``window_phrase`` is the prose form used in the footer and the shame
+    heading. ``until`` bounds the top of the window (``None`` = open-ended up to
+    now).
+
+    Returns ``(contest, embed)``. ``embed`` is ``None`` when nobody logged
+    anything in the window, leaving it to the caller to show an "empty" message
+    (the interactive commands) or simply skip posting (the alerts). Raises
+    ``tadoku.TadokuAPIError`` if resolving the contest or tallying logs fails.
+    """
+    contest = await _resolve_contest(bot, guild_id)
+    totals = await _tally_scores_since(bot, contest["id"], cutoff, until=until)
+
+    ranked = _rank_by_score(totals)
+    if not ranked:
+        return contest, None
+
+    # Show the top slice; the tally already covers everyone in the window.
+    lines = [_format_entry_line(entry) for entry in ranked[:PAGE_SIZE]]
+    embed = discord.Embed(
+        title=f"🗓️ {contest['title']} — {title_suffix}",
+        description="\n".join(lines),
+        color=discord.Color.blurple(),
+    )
+    shown = min(len(ranked), PAGE_SIZE)
+    embed.set_footer(
+        text=f"Top {shown} of {len(ranked)} · points logged in {window_phrase}"
+    )
+
+    # When enabled for this server (on by default), append a call to shame:
+    # everyone with contest points overall who logged nothing in the window.
+    if config_store.get_guild_shame(guild_id):
+        try:
+            participants = await _scored_participants(bot, contest["id"])
+        except tadoku.TadokuAPIError:
+            # The ranking above already succeeded; a failed shame lookup
+            # shouldn't sink the whole embed, so just skip the section.
+            participants = []
+        slackers = _shame_slackers(participants, totals)
+        if slackers:
+            embed.add_field(
+                name=f"😤 Shame — logged nothing in {window_phrase}",
+                value=_format_shame_list(slackers),
+                inline=False,
+            )
+
+    return contest, embed
+
+
 class Leaderboard(commands.Cog):
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
@@ -460,65 +524,36 @@ class Leaderboard(commands.Cog):
     ) -> None:
         """Shared body for /weeklyleaderboard and /monthlyleaderboard.
 
-        Ranks participants by points logged in the window ``[cutoff, until)`` --
-        tallied from the contest's raw logs, since the API's own leaderboard is
-        only cumulative -- and, when the guild's shame setting is on, appends a
-        call-out of participants who have contest points overall but logged
-        nothing in the window. The commands differ only in the window:
-        ``until`` bounds the top (``None`` = open-ended up to now), ``title_suffix``
-        names it in the embed title, and ``window_phrase`` is the prose form used
-        in the footer, the empty-window message and the shame heading.
+        Builds the period ranking embed via ``build_period_leaderboard_embed``
+        and delivers it, mapping the "couldn't reach tadoku.app" and empty-window
+        cases to their user-facing messages.
         """
         # Tallying logs is several network calls; defer so Discord doesn't time
         # the interaction out. Public, like /leaderboard.
         await interaction.response.defer()
 
         try:
-            contest = await _resolve_contest(self.bot, interaction.guild_id)
-            totals = await _tally_scores_since(self.bot, contest["id"], cutoff, until=until)
+            contest, embed = await build_period_leaderboard_embed(
+                self.bot,
+                interaction.guild_id,
+                cutoff=cutoff,
+                until=until,
+                title_suffix=title_suffix,
+                window_phrase=window_phrase,
+            )
         except tadoku.TadokuAPIError:
             await interaction.followup.send(
                 "❌ Couldn't reach tadoku.app right now. Try again in a moment."
             )
             return
 
-        ranked = _rank_by_score(totals)
-        if not ranked:
+        if embed is None:
             # Nobody logged anything in the window (e.g. the contest ended before
             # it, or it's brand new with no logs yet).
             await interaction.followup.send(
                 f"No points logged in {window_phrase} for **{contest['title']}**."
             )
             return
-
-        # Show the top slice; the tally already covers everyone in the window.
-        lines = [_format_entry_line(entry) for entry in ranked[:PAGE_SIZE]]
-        embed = discord.Embed(
-            title=f"🗓️ {contest['title']} — {title_suffix}",
-            description="\n".join(lines),
-            color=discord.Color.blurple(),
-        )
-        shown = min(len(ranked), PAGE_SIZE)
-        embed.set_footer(
-            text=f"Top {shown} of {len(ranked)} · points logged in {window_phrase}"
-        )
-
-        # When enabled for this server (on by default), append a call to shame:
-        # everyone with contest points overall who logged nothing in the window.
-        if config_store.get_guild_shame(interaction.guild_id):
-            try:
-                participants = await _scored_participants(self.bot, contest["id"])
-            except tadoku.TadokuAPIError:
-                # The ranking above already succeeded; a failed shame lookup
-                # shouldn't sink the whole reply, so just skip the section.
-                participants = []
-            slackers = _shame_slackers(participants, totals)
-            if slackers:
-                embed.add_field(
-                    name=f"😤 Shame — logged nothing in {window_phrase}",
-                    value=_format_shame_list(slackers),
-                    inline=False,
-                )
 
         await interaction.followup.send(embed=embed)
 
