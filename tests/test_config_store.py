@@ -147,6 +147,18 @@ def test_weekly_and_monthly_alerts_are_independent():
     assert config_store.get_guild_alert(1, "monthly")["channel_id"] == 2
 
 
+def test_yearly_alert_round_trip():
+    config_store.set_guild_alert(1, "yearly", enabled=True, channel_id=8, last_period=[2026])
+
+    assert config_store.get_guild_alert(1, "yearly") == {
+        "enabled": True,
+        "channel_id": 8,
+        "last_period": [2026],
+    }
+    # Independent from the other kinds.
+    assert config_store.get_guild_alert(1, "weekly")["enabled"] is False
+
+
 def test_alerts_preserve_contest_and_shame():
     config_store.set_guild_contest(1, "contest-a", "Contest A")
     config_store.set_guild_shame(1, False)

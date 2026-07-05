@@ -1,12 +1,13 @@
-"""Tests for the alerts cog (/weekly_wrapup, /monthly_wrapup + the scheduler).
+"""Tests for the alerts cog (the /alerts command group + the scheduler).
 
 The tadoku-facing embed build is covered in test_leaderboard_cog.py, so here we
-monkeypatch ``build_period_leaderboard_embed`` and focus on the alert-specific
-logic: period/window computation, the admin toggle commands, and the scheduler's
-"post once per period, retry on API error, tolerate a bad channel" behaviour.
-Cog callbacks are invoked directly with a fake interaction; the scheduler is
-driven through ``_run_due_alerts`` / ``_maybe_post`` / ``_post`` with a fixed
-``now`` so nothing depends on the wall clock or a live loop.
+monkeypatch ``build_period_leaderboard_embed`` / ``build_yearend_embed`` and
+focus on the alert-specific logic: period/window computation, the ``/alerts``
+on/off/status toggle (which drives all three kinds), and the scheduler's "post
+once per period, retry on API error, tolerate a bad channel" behaviour. Cog
+callbacks are invoked directly with a fake interaction; the scheduler is driven
+through ``_run_due_alerts`` / ``_maybe_post`` / ``_post`` with a fixed ``now`` so
+nothing depends on the wall clock or a live loop.
 """
 
 from datetime import datetime, timedelta, timezone
@@ -15,7 +16,6 @@ from unittest.mock import AsyncMock
 
 import discord
 import pytest
-from discord.app_commands import MissingPermissions
 
 import cogs.alerts as alerts_cog
 import cogs.leaderboard as leaderboard_cog
@@ -26,8 +26,11 @@ from tests.conftest import make_interaction
 CONTEST = {"id": "c1", "title": "2026 Round 4"}
 
 
-def _fake_channel(cid=555, mention="#general"):
-    return SimpleNamespace(id=cid, mention=mention, send=AsyncMock())
+def _fake_channel(cid=555, mention="#general", can_send=True):
+    perms = SimpleNamespace(send_messages=can_send)
+    return SimpleNamespace(
+        id=cid, mention=mention, send=AsyncMock(), permissions_for=lambda member: perms
+    )
 
 
 def _bot_with_channel(channel):
@@ -67,6 +70,11 @@ def test_period_key_monthly_uses_year_month():
     assert alerts_cog._period_key("monthly", now) == [2026, 7]
 
 
+def test_period_key_yearly_uses_year():
+    now = datetime(2026, 12, 31, 23, tzinfo=timezone.utc)
+    assert alerts_cog._period_key("yearly", now) == [2026]
+
+
 def test_window_for_weekly_is_rolling_last_seven_days():
     now = datetime(2026, 7, 8, tzinfo=timezone.utc)
     cutoff, until, title, phrase = alerts_cog._window_for("weekly", now)
@@ -97,56 +105,81 @@ def test_window_for_monthly_in_january_rolls_back_to_december():
 
 
 # ---------------------------------------------------------------------------
-# /weekly_wrapup & /monthly_wrapup (admin toggles)
+# /alerts on|off|status (one switch for all kinds)
 # ---------------------------------------------------------------------------
 
 
-async def test_weekly_wrapup_enable_stores_channel_and_seeds_period(fake_bot):
+def _guild_interaction(guild_id=999):
+    interaction = make_interaction(guild_id=guild_id)
+    interaction.guild = SimpleNamespace(me=object())  # for channel.permissions_for
+    return interaction
+
+
+async def test_alerts_on_enables_all_kinds_in_one_channel(fake_bot):
     cog = alerts_cog.Alerts(fake_bot)
-    interaction = make_interaction(guild_id=999)
+    interaction = _guild_interaction()
     interaction.channel = _fake_channel(cid=555)
 
-    await cog.weekly_wrapup.callback(cog, interaction, enabled=True, channel=None)
+    await cog.alerts_on.callback(cog, interaction, channel=None)
 
-    settings = config_store.get_guild_alert(999, "weekly")
-    assert settings["enabled"] is True
-    assert settings["channel_id"] == 555
-    # Seeded to the current period so the first post lands at the next boundary.
-    assert settings["last_period"] == alerts_cog._period_key("weekly", datetime.now(timezone.utc))
+    now = datetime.now(timezone.utc)
+    for kind in config_store.ALERT_KINDS:
+        settings = config_store.get_guild_alert(999, kind)
+        assert settings["enabled"] is True
+        assert settings["channel_id"] == 555
+        # Seeded to the current period so the first post lands at the next boundary.
+        assert settings["last_period"] == alerts_cog._period_key(kind, now)
     args, kwargs = interaction.response.send_message.await_args
     assert kwargs.get("ephemeral") is True
     assert "on" in args[0]
 
 
-async def test_weekly_wrapup_enable_uses_explicit_channel_over_current(fake_bot):
+async def test_alerts_on_uses_explicit_channel_over_current(fake_bot):
     cog = alerts_cog.Alerts(fake_bot)
-    interaction = make_interaction(guild_id=999)
+    interaction = _guild_interaction()
     interaction.channel = _fake_channel(cid=1)  # should be ignored
     chosen = _fake_channel(cid=777, mention="#logs")
 
-    await cog.weekly_wrapup.callback(cog, interaction, enabled=True, channel=chosen)
+    await cog.alerts_on.callback(cog, interaction, channel=chosen)
 
-    assert config_store.get_guild_alert(999, "weekly")["channel_id"] == 777
+    for kind in config_store.ALERT_KINDS:
+        assert config_store.get_guild_alert(999, kind)["channel_id"] == 777
 
 
-async def test_weekly_wrapup_disable(fake_bot):
-    config_store.set_guild_alert(999, "weekly", enabled=True, channel_id=1)
+async def test_alerts_on_refuses_channel_it_cannot_post_to(fake_bot):
     cog = alerts_cog.Alerts(fake_bot)
-    interaction = make_interaction(guild_id=999)
+    interaction = _guild_interaction()
+    interaction.channel = _fake_channel(cid=555, can_send=False)
 
-    await cog.weekly_wrapup.callback(cog, interaction, enabled=False, channel=None)
+    await cog.alerts_on.callback(cog, interaction, channel=None)
 
-    assert config_store.get_guild_alert(999, "weekly")["enabled"] is False
+    # Nothing enabled, and the reply explains why.
+    for kind in config_store.ALERT_KINDS:
+        assert config_store.get_guild_alert(999, kind)["enabled"] is False
+    args, _ = interaction.response.send_message.await_args
+    assert "permission" in args[0].lower()
+
+
+async def test_alerts_off_disables_all_kinds(fake_bot):
+    for kind in config_store.ALERT_KINDS:
+        config_store.set_guild_alert(999, kind, enabled=True, channel_id=555)
+    cog = alerts_cog.Alerts(fake_bot)
+    interaction = _guild_interaction()
+
+    await cog.alerts_off.callback(cog, interaction)
+
+    for kind in config_store.ALERT_KINDS:
+        assert config_store.get_guild_alert(999, kind)["enabled"] is False
     args, _ = interaction.response.send_message.await_args
     assert "off" in args[0]
 
 
-async def test_weekly_wrapup_reports_state_when_on(fake_bot):
+async def test_alerts_status_reports_on(fake_bot):
     config_store.set_guild_alert(999, "weekly", enabled=True, channel_id=555)
     cog = alerts_cog.Alerts(fake_bot)
-    interaction = make_interaction(guild_id=999)
+    interaction = _guild_interaction()
 
-    await cog.weekly_wrapup.callback(cog, interaction, enabled=None, channel=None)
+    await cog.alerts_status.callback(cog, interaction)
 
     args, kwargs = interaction.response.send_message.await_args
     assert "on" in args[0]
@@ -154,38 +187,19 @@ async def test_weekly_wrapup_reports_state_when_on(fake_bot):
     assert kwargs.get("ephemeral") is True
 
 
-async def test_weekly_wrapup_reports_state_when_off(fake_bot):
+async def test_alerts_status_reports_off(fake_bot):
     cog = alerts_cog.Alerts(fake_bot)
-    interaction = make_interaction(guild_id=999)
+    interaction = _guild_interaction()
 
-    await cog.weekly_wrapup.callback(cog, interaction, enabled=None, channel=None)
+    await cog.alerts_status.callback(cog, interaction)
 
     args, _ = interaction.response.send_message.await_args
     assert "off" in args[0]
 
 
-async def test_monthly_wrapup_enable_stores_under_monthly_kind(fake_bot):
-    cog = alerts_cog.Alerts(fake_bot)
-    interaction = make_interaction(guild_id=999)
-    interaction.channel = _fake_channel(cid=321)
-
-    await cog.monthly_wrapup.callback(cog, interaction, enabled=True, channel=None)
-
-    assert config_store.get_guild_alert(999, "monthly")["channel_id"] == 321
-    # Weekly is untouched.
-    assert config_store.get_guild_alert(999, "weekly")["enabled"] is False
-
-
-async def test_wrapup_commands_require_manage_guild_permission():
-    interaction = make_interaction(guild_id=999)
-    interaction.permissions = discord.Permissions.none()
-
-    [weekly_predicate] = alerts_cog.Alerts.weekly_wrapup.checks
-    [monthly_predicate] = alerts_cog.Alerts.monthly_wrapup.checks
-    with pytest.raises(MissingPermissions):
-        weekly_predicate(interaction)
-    with pytest.raises(MissingPermissions):
-        monthly_predicate(interaction)
+def test_alerts_group_requires_manage_guild():
+    perms = alerts_cog.Alerts.alerts_group.default_permissions
+    assert perms is not None and perms.manage_guild is True
 
 
 # ---------------------------------------------------------------------------
@@ -252,6 +266,23 @@ async def test_maybe_post_monthly_posts_previous_month(patched_embed):
     assert bkwargs["until"] == datetime(2026, 7, 1, tzinfo=timezone.utc)
     assert bkwargs["title_suffix"] == "June 2026"
     assert config_store.get_guild_alert(999, "monthly")["last_period"] == [2026, 7]
+
+
+async def test_maybe_post_yearly_posts_final_standings(monkeypatch):
+    channel = _fake_channel(cid=555)
+    bot = _bot_with_channel(channel)
+    # Yearly uses the cumulative-standings builder, not the period one.
+    yearend = AsyncMock(return_value=(CONTEST, discord.Embed(title="final")))
+    monkeypatch.setattr(leaderboard_cog, "build_yearend_embed", yearend)
+    config_store.set_guild_alert(999, "yearly", enabled=True, channel_id=555, last_period=[2025])
+    cog = alerts_cog.Alerts(bot)
+    now = datetime(2026, 1, 1, 0, 15, tzinfo=timezone.utc)
+
+    await cog._maybe_post(999, "yearly", now)
+
+    channel.send.assert_awaited_once()
+    yearend.assert_awaited_once_with(bot, 999)
+    assert config_store.get_guild_alert(999, "yearly")["last_period"] == [2026]
 
 
 async def test_maybe_post_marks_done_when_nothing_to_post(monkeypatch):

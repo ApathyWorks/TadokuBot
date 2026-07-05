@@ -283,6 +283,52 @@ def _format_entry_line(entry: dict) -> str:
     return f"{marker} {entry['user_display_name']} — {entry['score']:.1f}{tie}"
 
 
+async def build_yearend_embed(
+    bot: commands.Bot, guild_id: Optional[int]
+) -> tuple[dict, Optional[discord.Embed]]:
+    """Resolve the guild's contest and render its cumulative standings as a
+    festive year-end recap.
+
+    Used by the year-end alert (``cogs.alerts``). Unlike the weekly/monthly
+    builder, this shows the contest's *cumulative* leaderboard -- the same data
+    ``/leaderboard`` displays (via ``tadoku.get_contest_leaderboard``) -- topped
+    with a podium congratulation for the top three finishers. Mirrors
+    ``build_period_leaderboard_embed``'s contract: returns ``(contest, embed)``
+    with ``embed=None`` when nobody's on the leaderboard, and raises
+    ``tadoku.TadokuAPIError`` if the lookup fails.
+    """
+    contest = await _resolve_contest(bot, guild_id)
+    data = await tadoku.get_contest_leaderboard(
+        bot.session, contest["id"], page=0, page_size=PAGE_SIZE
+    )
+    entries = data.get("entries", [])
+    if not entries:
+        return contest, None
+
+    embed = discord.Embed(
+        title=f"🎉 {contest['title']} — Final Standings 🎉",
+        description="\n".join(_format_entry_line(entry) for entry in entries),
+        color=discord.Color.gold(),
+    )
+    # Congratulate the podium (however many of the top 3 exist).
+    podium = ", ".join(
+        f"{MEDALS[entry['rank']]} {entry['user_display_name']}"
+        for entry in entries[:3]
+        if entry["rank"] in MEDALS
+    )
+    congrats = f"Congratulations to our top finishers — {podium}! " if podium else ""
+    embed.add_field(
+        name="​",  # zero-width so the field has no visible header
+        value=(
+            f"{congrats}Thank you all for a fantastic year of immersion. "
+            "Hope to see everyone again next year! 🎊"
+        ),
+        inline=False,
+    )
+    embed.set_footer(text=f"{data.get('total_size', len(entries))} participants")
+    return contest, embed
+
+
 async def build_period_leaderboard_embed(
     bot: commands.Bot,
     guild_id: Optional[int],

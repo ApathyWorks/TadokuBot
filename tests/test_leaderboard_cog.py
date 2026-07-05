@@ -1015,3 +1015,61 @@ async def test_monthly_command_uses_configured_contest(fake_bot):
     assert called_contest_id == "configured-id"
     embed = interaction.followup.send.await_args.kwargs["embed"]
     assert "Configured Contest" in embed.title
+
+
+# ---------------------------------------------------------------------------
+# build_yearend_embed (the year-end alert's cumulative recap)
+# ---------------------------------------------------------------------------
+
+async def test_yearend_embed_renders_standings_with_podium_congrats(fake_bot):
+    tadoku_client.get_contest_leaderboard.return_value = {
+        "entries": [_entry(1, "ruby", 100.0), _entry(2, "ryun", 90.0), _entry(3, "anja", 80.0)],
+        "total_size": 3,
+    }
+
+    contest, embed = await leaderboard_cog.build_yearend_embed(fake_bot, guild_id=999)
+
+    assert contest == LATEST_OFFICIAL
+    assert "Final Standings" in embed.title
+    # Full standings in the description.
+    assert "ruby" in embed.description and "ryun" in embed.description and "anja" in embed.description
+    # Top-3 podium named in the congratulation field.
+    field_text = embed.fields[0].value
+    assert "ruby" in field_text and "ryun" in field_text and "anja" in field_text
+    assert "next year" in field_text.lower()
+    assert "3 participants" in embed.footer.text
+
+
+async def test_yearend_embed_none_when_no_entries(fake_bot):
+    tadoku_client.get_contest_leaderboard.return_value = {"entries": [], "total_size": 0}
+
+    contest, embed = await leaderboard_cog.build_yearend_embed(fake_bot, guild_id=999)
+
+    assert contest == LATEST_OFFICIAL
+    assert embed is None
+
+
+async def test_yearend_embed_handles_fewer_than_three_participants(fake_bot):
+    tadoku_client.get_contest_leaderboard.return_value = {
+        "entries": [_entry(1, "solo", 5.0)],
+        "total_size": 1,
+    }
+
+    _contest, embed = await leaderboard_cog.build_yearend_embed(fake_bot, guild_id=999)
+
+    field_text = embed.fields[0].value
+    assert "solo" in field_text
+    assert "next year" in field_text.lower()
+
+
+async def test_yearend_embed_uses_configured_contest(fake_bot):
+    config_store.set_guild_contest(999, "configured-id", "Configured Contest")
+    tadoku_client.get_contest_leaderboard.return_value = {
+        "entries": [_entry(1, "ruby", 100.0)],
+        "total_size": 1,
+    }
+
+    contest, embed = await leaderboard_cog.build_yearend_embed(fake_bot, guild_id=999)
+
+    assert contest == CONFIGURED_CONTEST
+    assert "Configured Contest" in embed.title

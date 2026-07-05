@@ -15,8 +15,24 @@ logs or scores.
 | `/set_contest contest:<search>` | **Manage Server** permission required. Picks which contest `/leaderboard` shows for this server, with autocomplete search over tadoku.app's contest list. |
 | `/current_contest` | Shows which contest this server is currently configured to display. |
 | `/shame [enabled]` | **Manage Server** permission required. Turns the shame call-out on `/weeklyleaderboard` and `/monthlyleaderboard` on or off for this server (default **on**). Run without `enabled` to see the current setting. |
-| `/weekly_wrapup [enabled] [channel]` | **Manage Server** permission required. Turns the automatic **weekly wrap-up** on or off. When on, the bot posts the weekly leaderboard to the chosen channel (or the channel the command was run in) at the start of each week. Run without `enabled` to see the current setting. |
-| `/monthly_wrapup [enabled] [channel]` | **Manage Server** permission required. Turns the automatic **monthly wrap-up** on or off. When on, the bot posts the previous month's leaderboard to the chosen channel on the 1st of each month. Run without `enabled` to see the current setting. |
+| `/alerts on [channel]` / `/alerts off` / `/alerts status` | **Manage Server** permission required. One switch for all automatic leaderboard posts. See below. |
+
+## Scheduled alerts
+
+`/alerts on channel:#somewhere` opts a server into three automatic posts (all times **UTC**), each
+for that server's current contest — one on/off switch, one channel (defaults to the channel you run
+`/alerts on` in):
+
+| Alert | When | Content |
+| --- | --- | --- |
+| Weekly | Start of each week (**Monday 00:00**) | The rolling last-7-days ranking (same as `/weeklyleaderboard`). |
+| Monthly | The **1st, 00:00** | The just-ended month's ranking (same as `/monthlyleaderboard` for that month). |
+| Year-end | **Jan 1, 00:00** | The contest's final cumulative standings (same as `/leaderboard`), topped with a **top-3 podium congratulation**. |
+
+`/alerts off` disables all three; `/alerts status` shows the current channel. A background task
+checks hourly and posts each alert at most once per period, so it fires correctly across restarts or
+a missed midnight. The bot must be able to post in the chosen channel — `/alerts on` refuses one it
+can't send to.
 
 ## Setup
 
@@ -40,9 +56,9 @@ new/changed commands to clients.
 ## Local state
 
 The only thing persisted locally is `data/config.json`, a per-server mapping of settings: which
-contest `/leaderboard` should display, whether the shame call-out is on, and each server's
-weekly/monthly wrap-up alert settings (enabled, target channel, and the last period posted).
-Everything else (contest details, scores, rankings) is fetched live from
+contest `/leaderboard` should display, whether the shame call-out is on, and each server's alert
+settings (enabled, target channel, and the last period posted for each of the weekly/monthly/yearly
+alerts). Everything else (contest details, scores, rankings) is fetched live from
 `https://tadoku.app/api/internal/immersion/`.
 
 ## Running tests

@@ -1,19 +1,20 @@
-"""Alerts cog: automatic weekly/monthly wrap-up posts, plus their admin toggles.
+"""Alerts cog: automatic end-of-week / month / year leaderboard posts.
 
-Two slash commands let a server manager turn each wrap-up on or off and choose
-where it posts:
+One ``/alerts`` command group (Manage Server) turns all three alerts on or off
+together and picks the single channel they post to:
 
-  * ``/weekly_wrapup``  -- post the last-7-days ranking at the start of each week.
-  * ``/monthly_wrapup`` -- post the just-ended month's ranking on the 1st.
+  * **weekly**  -- the last-7-days ranking, at the start of each week (Monday).
+  * **monthly** -- the just-ended month's ranking, on the 1st.
+  * **yearly**  -- the contest's final cumulative standings with a top-3 podium
+    congratulation, on Jan 1.
 
-Both require the **Manage Server** permission. A background loop (``check_alerts``)
-runs hourly: for every guild with an alert enabled, once the calendar period
-rolls over it renders the same embed the ``/weeklyleaderboard`` /
-``/monthlyleaderboard`` commands produce (via
-``cogs.leaderboard.build_period_leaderboard_embed``) and posts it to the
-configured channel. A per-guild ``last_period`` marker makes each wrap-up fire
-exactly once per period and survive bot restarts (it catches up on the next tick
-if the bot was down when the period rolled over).
+A background loop (``check_alerts``) runs hourly: for every guild with alerts
+enabled, once a calendar period rolls over it renders the embed for that kind
+(weekly/monthly via ``build_period_leaderboard_embed``; yearly via
+``build_yearend_embed``) and posts it to the configured channel. A per-guild,
+per-kind ``last_period`` marker makes each alert fire exactly once per period and
+survive restarts (it catches up on the next tick if the bot was down when the
+period rolled over).
 """
 
 import logging
@@ -40,12 +41,15 @@ def _period_key(kind: str, now: datetime) -> list[int]:
     """Identify the calendar period ``now`` falls in for the given alert kind.
 
     Weekly uses the ISO year+week (so it advances every Monday); monthly uses
-    year+month. Returned as a plain list so it round-trips through JSON and
-    compares by value against the stored ``last_period``.
+    year+month (advances on the 1st); yearly uses the year alone (advances on
+    Jan 1). Returned as a plain list so it round-trips through JSON and compares
+    by value against the stored ``last_period``.
     """
     if kind == "weekly":
         iso = now.isocalendar()
         return [iso[0], iso[1]]
+    if kind == "yearly":
+        return [now.year]
     return [now.year, now.month]
 
 
@@ -128,18 +132,23 @@ class Alerts(commands.Cog):
 
         period = _period_key(kind, now)
         if settings["last_period"] == period:
-            return  # already handled this week/month
+            return  # already handled this week/month/year
 
-        cutoff, until, title_suffix, window_phrase = _window_for(kind, now)
         try:
-            _contest, embed = await leaderboard.build_period_leaderboard_embed(
-                self.bot,
-                guild_id,
-                cutoff=cutoff,
-                until=until,
-                title_suffix=title_suffix,
-                window_phrase=window_phrase,
-            )
+            if kind == "yearly":
+                # Year-end shows the contest's cumulative standings (like
+                # /leaderboard) plus a podium congratulation -- not a windowed tally.
+                _contest, embed = await leaderboard.build_yearend_embed(self.bot, guild_id)
+            else:
+                cutoff, until, title_suffix, window_phrase = _window_for(kind, now)
+                _contest, embed = await leaderboard.build_period_leaderboard_embed(
+                    self.bot,
+                    guild_id,
+                    cutoff=cutoff,
+                    until=until,
+                    title_suffix=title_suffix,
+                    window_phrase=window_phrase,
+                )
         except tadoku.TadokuAPIError:
             # Transient (or contest gone): don't advance last_period, so we retry.
             _log.warning(
@@ -178,101 +187,77 @@ class Alerts(commands.Cog):
 
     # -- admin commands -----------------------------------------------------
 
-    async def _configure_alert(
-        self,
-        interaction: discord.Interaction,
-        kind: str,
-        enabled: Optional[bool],
-        channel: Optional[discord.TextChannel],
-        label: str,
-        cadence: str,
-    ) -> None:
-        """Shared handler for /weekly_wrapup and /monthly_wrapup.
+    def _set_all_alerts(self, guild_id: int, enabled: bool, channel_id: Optional[int] = None) -> None:
+        """Apply the same on/off (+ channel) to every alert kind for a guild.
 
-        With ``enabled`` omitted it reports the current setting; ``False`` turns
-        the alert off; ``True`` turns it on, posting in ``channel`` (defaulting to
-        the channel the command was run in). On enable we seed ``last_period`` to
-        the current period so the first post lands at the *next* boundary rather
-        than immediately. All replies are ephemeral.
+        On enable, each kind's ``last_period`` is seeded to the current period so
+        the first post lands at that kind's *next* boundary (Monday / the 1st /
+        Jan 1) rather than immediately.
         """
-        settings = config_store.get_guild_alert(interaction.guild_id, kind)
-
-        if enabled is None:
-            if settings["enabled"] and settings["channel_id"]:
-                await interaction.response.send_message(
-                    f"The {label} is **on**, posting in <#{settings['channel_id']}> {cadence}.",
-                    ephemeral=True,
+        now = datetime.now(timezone.utc)
+        for kind in config_store.ALERT_KINDS:
+            if enabled:
+                config_store.set_guild_alert(
+                    guild_id,
+                    kind,
+                    enabled=True,
+                    channel_id=channel_id,
+                    last_period=_period_key(kind, now),
                 )
             else:
-                await interaction.response.send_message(
-                    f"The {label} is **off**. Use `enabled:True` to turn it on.",
-                    ephemeral=True,
-                )
-            return
+                config_store.set_guild_alert(guild_id, kind, enabled=False)
 
-        if not enabled:
-            config_store.set_guild_alert(interaction.guild_id, kind, enabled=False)
+    # One group gates every subcommand behind Manage Server and guild-only.
+    alerts_group = app_commands.Group(
+        name="alerts",
+        description="Automatic end-of-week / month / year leaderboard posts.",
+        guild_only=True,
+        default_permissions=discord.Permissions(manage_guild=True),
+    )
+
+    @alerts_group.command(name="on", description="Turn on all leaderboard alerts, posting to a channel.")
+    @app_commands.describe(channel="Channel to post the alerts in (defaults to this channel).")
+    async def alerts_on(
+        self, interaction: discord.Interaction, channel: Optional[discord.TextChannel] = None
+    ):
+        """Enable the weekly, monthly and year-end alerts in one channel."""
+        target = channel or interaction.channel
+        # Refuse a channel the bot can't post in, so the admin finds out now
+        # rather than from silence at the next boundary.
+        if not target.permissions_for(interaction.guild.me).send_messages:
             await interaction.response.send_message(
-                f"✅ The {label} is now **off**.", ephemeral=True
+                f"❌ I don't have permission to send messages in {target.mention}.",
+                ephemeral=True,
             )
             return
-
-        # Enabling: post in the given channel, or the one the command was used in.
-        target = channel or interaction.channel
-        config_store.set_guild_alert(
-            interaction.guild_id,
-            kind,
-            enabled=True,
-            channel_id=target.id,
-            # Seed to the current period so we don't fire an extra post right now.
-            last_period=_period_key(kind, datetime.now(timezone.utc)),
-        )
+        self._set_all_alerts(interaction.guild_id, enabled=True, channel_id=target.id)
         await interaction.response.send_message(
-            f"✅ The {label} is now **on**, posting in {target.mention} {cadence}.",
+            f"✅ Alerts are **on** in {target.mention}: the weekly wrap-up (Mondays), the monthly "
+            "wrap-up (the 1st), and the year-end recap (Jan 1), all at 00:00 UTC.",
             ephemeral=True,
         )
 
-    @app_commands.command(
-        name="weekly_wrapup",
-        description="Turn the automatic weekly leaderboard wrap-up on or off for this server.",
-    )
-    @app_commands.describe(
-        enabled="Turn the weekly wrap-up on or off. Omit to see the current setting.",
-        channel="Channel to post the wrap-up in (defaults to this channel).",
-    )
-    @app_commands.guild_only()
-    @app_commands.checks.has_permissions(manage_guild=True)
-    async def weekly_wrapup(
-        self,
-        interaction: discord.Interaction,
-        enabled: Optional[bool] = None,
-        channel: Optional[discord.TextChannel] = None,
-    ):
-        """Configure the weekly wrap-up (see ``_configure_alert``)."""
-        await self._configure_alert(
-            interaction, "weekly", enabled, channel, "weekly wrap-up", "at the start of each week"
-        )
+    @alerts_group.command(name="off", description="Turn off all leaderboard alerts for this server.")
+    async def alerts_off(self, interaction: discord.Interaction):
+        """Disable every alert (the contest pin and shame setting are untouched)."""
+        self._set_all_alerts(interaction.guild_id, enabled=False)
+        await interaction.response.send_message("✅ Alerts are now **off**.", ephemeral=True)
 
-    @app_commands.command(
-        name="monthly_wrapup",
-        description="Turn the automatic monthly leaderboard wrap-up on or off for this server.",
-    )
-    @app_commands.describe(
-        enabled="Turn the monthly wrap-up on or off. Omit to see the current setting.",
-        channel="Channel to post the wrap-up in (defaults to this channel).",
-    )
-    @app_commands.guild_only()
-    @app_commands.checks.has_permissions(manage_guild=True)
-    async def monthly_wrapup(
-        self,
-        interaction: discord.Interaction,
-        enabled: Optional[bool] = None,
-        channel: Optional[discord.TextChannel] = None,
-    ):
-        """Configure the monthly wrap-up (see ``_configure_alert``)."""
-        await self._configure_alert(
-            interaction, "monthly", enabled, channel, "monthly wrap-up", "on the 1st of each month"
-        )
+    @alerts_group.command(name="status", description="Show whether alerts are on, and where.")
+    async def alerts_status(self, interaction: discord.Interaction):
+        """Report whether alerts are enabled and which channel they post to."""
+        # All kinds share one switch/channel, so the weekly setting is representative.
+        settings = config_store.get_guild_alert(interaction.guild_id, "weekly")
+        if settings["enabled"] and settings["channel_id"]:
+            await interaction.response.send_message(
+                f"Alerts are **on**, posting to <#{settings['channel_id']}> "
+                "(weekly, monthly and year-end).",
+                ephemeral=True,
+            )
+        else:
+            await interaction.response.send_message(
+                "Alerts are **off**. Use `/alerts on` to enable them.", ephemeral=True
+            )
 
 
 async def setup(bot: commands.Bot) -> None:

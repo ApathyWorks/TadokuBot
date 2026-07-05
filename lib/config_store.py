@@ -120,12 +120,14 @@ def set_guild_shame(guild_id: int, enabled: bool) -> None:
     _write(data)
 
 
-# The two automatic wrap-up alerts, each configured independently per guild.
-ALERT_KINDS = ("weekly", "monthly")
+# The automatic alerts, each configured independently per guild. All three share
+# one on/off switch and channel via ``/alerts``, but keep their own ``last_period``
+# marker so they fire on their own boundaries (Monday / the 1st / Jan 1).
+ALERT_KINDS = ("weekly", "monthly", "yearly")
 
 
 def get_guild_alert(guild_id: int, kind: str) -> dict:
-    """Return a guild's settings for the ``kind`` ("weekly"/"monthly") wrap-up.
+    """Return a guild's settings for the ``kind`` ("weekly"/"monthly"/"yearly") alert.
 
     Always returns a dict with all three keys so callers never have to guard for
     absence:
@@ -133,8 +135,9 @@ def get_guild_alert(guild_id: int, kind: str) -> dict:
       * ``enabled``     -- whether the alert posts automatically (default False).
       * ``channel_id``  -- the channel to post in (int), or ``None`` if unset.
       * ``last_period`` -- the last period already posted, as ``[year, week]``
-        (weekly) or ``[year, month]`` (monthly), or ``None`` if never posted.
-        The scheduler uses this to fire once per period and to avoid re-posting.
+        (weekly), ``[year, month]`` (monthly) or ``[year]`` (yearly), or ``None``
+        if never posted. The scheduler uses this to fire once per period and to
+        avoid re-posting.
     """
     if kind not in ALERT_KINDS:
         raise ValueError(f"unknown alert kind: {kind!r}")
