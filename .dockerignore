@@ -1,0 +1,13 @@
+# Keep secrets, local state, and build cruft out of the image.
+.git/
+.venv/
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.env
+data/config.json
+.claude/
+tests/
+requirements-dev.txt
+pyproject.toml

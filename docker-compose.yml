@@ -1,0 +1,13 @@
+services:
+  bot:
+    build: .
+    # Supplies DISCORD_TOKEN (read from ./.env on the host; not baked into the image).
+    env_file: .env
+    # Auto-restart on crash or a dropped gateway connection.
+    restart: unless-stopped
+    volumes:
+      # Persist data/config.json (per-guild settings) across rebuilds.
+      - tadoku-data:/app/data
+
+volumes:
+  tadoku-data:
