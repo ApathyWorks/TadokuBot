@@ -194,3 +194,67 @@ def test_alert_accessors_reject_unknown_kind():
 def test_set_alert_rejects_unknown_field():
     with pytest.raises(ValueError):
         config_store.set_guild_alert(1, "weekly", bogus=True)
+
+
+# ---------------------------------------------------------------------------
+# Log feed
+# ---------------------------------------------------------------------------
+
+def test_get_guild_logfeed_defaults_when_unset():
+    assert config_store.get_guild_logfeed(1) == {
+        "enabled": False,
+        "channel_id": None,
+        "last_seen": None,
+    }
+
+
+def test_set_and_get_logfeed_round_trip():
+    config_store.set_guild_logfeed(1, enabled=True, channel_id=42, last_seen="2026-07-05T20:00:00Z")
+
+    assert config_store.get_guild_logfeed(1) == {
+        "enabled": True,
+        "channel_id": 42,
+        "last_seen": "2026-07-05T20:00:00Z",
+    }
+
+
+def test_set_logfeed_merges_partial_updates():
+    config_store.set_guild_logfeed(1, enabled=True, channel_id=42, last_seen="2026-07-05T20:00:00Z")
+    # Bumping only last_seen keeps enabled/channel_id.
+    config_store.set_guild_logfeed(1, last_seen="2026-07-05T21:00:00Z")
+
+    assert config_store.get_guild_logfeed(1) == {
+        "enabled": True,
+        "channel_id": 42,
+        "last_seen": "2026-07-05T21:00:00Z",
+    }
+
+
+def test_logfeed_preserves_contest_and_alerts():
+    config_store.set_guild_contest(1, "contest-a", "Contest A")
+    config_store.set_guild_alert(1, "weekly", enabled=True, channel_id=7)
+    config_store.set_guild_logfeed(1, enabled=True, channel_id=9)
+
+    assert config_store.get_guild_contest(1)["contest_id"] == "contest-a"
+    assert config_store.get_guild_alert(1, "weekly")["channel_id"] == 7
+    assert config_store.get_guild_logfeed(1)["channel_id"] == 9
+
+
+def test_setting_contest_preserves_logfeed():
+    config_store.set_guild_logfeed(1, enabled=True, channel_id=9)
+    config_store.set_guild_contest(1, "contest-a", "Contest A")
+
+    assert config_store.get_guild_logfeed(1)["enabled"] is True
+
+
+def test_guilds_with_logfeed_lists_only_configured_guilds():
+    config_store.set_guild_contest(1, "contest-a", "Contest A")  # no logfeed
+    config_store.set_guild_logfeed(2, enabled=True, channel_id=1)
+    config_store.set_guild_logfeed(3, enabled=False, channel_id=2)
+
+    assert sorted(config_store.guilds_with_logfeed()) == [2, 3]
+
+
+def test_set_logfeed_rejects_unknown_field():
+    with pytest.raises(ValueError):
+        config_store.set_guild_logfeed(1, bogus=True)

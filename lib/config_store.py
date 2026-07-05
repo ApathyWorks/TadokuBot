@@ -181,3 +181,56 @@ def guilds_with_alerts() -> list[int]:
     ``enabled`` per kind).
     """
     return [int(gid) for gid, entry in _read().items() if entry.get("alerts")]
+
+
+# ---------------------------------------------------------------------------
+# Live log feed (the /log command)
+# ---------------------------------------------------------------------------
+
+_LOGFEED_FIELDS = {"enabled", "channel_id", "last_seen"}
+
+
+def get_guild_logfeed(guild_id: int) -> dict:
+    """Return a guild's live-log-feed settings, defaulting every key.
+
+      * ``enabled``    -- whether the feed posts new logs automatically (default False).
+      * ``channel_id`` -- the channel to post logs in (int), or ``None`` if unset.
+      * ``last_seen``  -- the ``created_at`` of the newest log already posted (an
+        ISO-8601 string), or ``None`` if never. The poller posts only logs newer
+        than this, so it never repeats or dumps a backlog.
+    """
+    entry = _read().get(str(guild_id)) or {}
+    settings = entry.get("logfeed") or {}
+    return {
+        "enabled": settings.get("enabled", False),
+        "channel_id": settings.get("channel_id"),
+        "last_seen": settings.get("last_seen"),
+    }
+
+
+def set_guild_logfeed(guild_id: int, **fields) -> None:
+    """Update some of a guild's log-feed settings, leaving the rest as-is.
+
+    Accepts any of ``enabled`` / ``channel_id`` / ``last_seen`` and merges them
+    into the stored settings, preserving the guild's other keys (contest, shame,
+    alerts). This partial shape lets the poller bump only ``last_seen`` without
+    touching the admin's ``enabled``/``channel_id`` choices.
+    """
+    unknown = set(fields) - _LOGFEED_FIELDS
+    if unknown:
+        raise ValueError(f"unknown logfeed field(s): {sorted(unknown)}")
+    data = _read()
+    entry = data.get(str(guild_id), {})
+    entry.setdefault("logfeed", {}).update(fields)
+    data[str(guild_id)] = entry
+    _write(data)
+
+
+def guilds_with_logfeed() -> list[int]:
+    """Return the ids of guilds that have the log feed configured.
+
+    Lets the poller iterate just the guilds it might post for. Only guilds with a
+    ``logfeed`` section are returned (whether enabled or not -- the caller checks
+    ``enabled``).
+    """
+    return [int(gid) for gid, entry in _read().items() if entry.get("logfeed")]

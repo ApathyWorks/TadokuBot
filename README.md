@@ -16,6 +16,7 @@ logs or scores.
 | `/current_contest` | Shows which contest this server is currently configured to display. |
 | `/shame [enabled]` | **Manage Server** permission required. Turns the shame call-out on `/weeklyleaderboard` and `/monthlyleaderboard` on or off for this server (default **on**). Run without `enabled` to see the current setting. |
 | `/alerts on [channel]` / `/alerts off` / `/alerts status` | **Manage Server** permission required. One switch for all automatic leaderboard posts. See below. |
+| `/log on [channel]` / `/log off` / `/log status` | **Manage Server** permission required. Live feed of new contest logs to a channel. See below. |
 
 ## Scheduled alerts
 
@@ -33,6 +34,18 @@ for that server's current contest — one on/off switch, one channel (defaults t
 checks hourly and posts each alert at most once per period, so it fires correctly across restarts or
 a missed midnight. The bot must be able to post in the chosen channel — `/alerts on` refuses one it
 can't send to.
+
+## Live log feed
+
+`/log on channel:#somewhere` turns on a live feed of the server's current contest: every **5
+minutes** the bot checks tadoku.app for new logs and posts each one — who logged it, what they
+logged (activity, amount, title, language), and the points — to the channel, one message per log
+(for example: `📖 **ruby** logged **192 Page** · Reading (Japanese) — 「奇跡を、生きている」 · **+192 pts**`).
+
+Only logs made *after* you run `/log on` are posted (no backlog dump); a per-server high-water mark
+keeps it from repeating. A burst is capped per poll with an "…and N more" note. `/log off` stops it;
+`/log status` shows the channel. Defaults to the channel you run `/log on` in, and the bot must be
+able to post there.
 
 ## Setup
 
