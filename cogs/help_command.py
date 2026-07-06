@@ -17,6 +17,9 @@ import lib.config_store as config_store
 
 _log = logging.getLogger(__name__)
 
+# The bot's source repository, linked from /tadokubot.
+REPO_URL = "https://github.com/ApathyWorks/TadokuBot"
+
 # The command catalogue rendered by /tadokubot, split by who can use each.
 # (name, one-line description). Kept as data so the embed and the "no command
 # drifts out of the list" test share one source of truth.
@@ -41,6 +44,8 @@ def build_help_embed() -> discord.Embed:
     """Render the grouped command list as an embed."""
     embed = discord.Embed(
         title="🤖 TadokuBot commands",
+        # Linking the title makes it clickable straight to the repo.
+        url=REPO_URL,
         description="Leaderboards and stats from tadoku.app for this server's contest.",
         color=discord.Color.blurple(),
     )
@@ -54,6 +59,7 @@ def build_help_embed() -> discord.Embed:
         value="\n".join(f"**{name}** — {desc}" for name, desc in ADMIN_COMMANDS),
         inline=False,
     )
+    embed.add_field(name="Source", value=f"[GitHub]({REPO_URL})", inline=False)
     return embed
 
 
