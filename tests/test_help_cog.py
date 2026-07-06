@@ -37,6 +37,9 @@ async def test_tadokubot_replies_with_grouped_ephemeral_embed(fake_bot):
     # A representative command from each group is listed.
     body = "\n".join(f.value for f in embed.fields)
     assert "/leaderboard" in body and "/set_contest" in body
+    # The GitHub repo is linked (title url + a Source field).
+    assert embed.url == help_cog.REPO_URL
+    assert help_cog.REPO_URL in body
 
 
 def test_admin_commands_are_the_manage_server_ones():
