@@ -33,6 +33,18 @@ async def test_missing_permissions_gets_friendly_message(tadoku_bot):
     assert kwargs.get("ephemeral") is True
 
 
+async def test_not_admin_gets_authorized_role_message(tadoku_bot):
+    from lib.permissions import NotAdmin
+
+    interaction = make_interaction(guild_id=999)
+
+    await tadoku_bot.on_application_command_error(interaction, NotAdmin())
+
+    args, kwargs = interaction.response.send_message.await_args
+    assert "Manage Server" in args[0] and "role" in args[0].lower()
+    assert kwargs.get("ephemeral") is True
+
+
 async def test_command_on_cooldown_reports_retry_after(tadoku_bot):
     interaction = make_interaction(guild_id=999)
     error = app_commands.CommandOnCooldown(Cooldown(1, 30), retry_after=12.7)

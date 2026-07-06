@@ -25,7 +25,9 @@ Anyone can use these.
 
 ### Admin commands (Manage Server)
 
-These require the **Manage Server** permission.
+These require the **Manage Server** permission — or membership in a role named in the optional
+`ADMIN_ROLES` env var (see [Setup](#setup)). They're visible to everyone in the slash menu but
+reject unauthorized users with an ephemeral message.
 
 | Command | Description |
 | --- | --- |
@@ -73,6 +75,11 @@ able to post there.
 3. Copy `.env.example` to `.env` and paste in the token:
    ```
    DISCORD_TOKEN=your_token_here
+   ```
+   Optionally, let extra roles run the admin commands (in addition to Manage Server) by naming them
+   (comma-separated, case-insensitive) — changing this needs a restart:
+   ```
+   ADMIN_ROLES=Moderator,Officers
    ```
 4. Run it:
    ```

@@ -11,6 +11,7 @@ import sys
 from dotenv import load_dotenv
 
 from bot import TadokuBot
+from lib.permissions import parse_admin_roles
 
 # Configure root logging once, before anything logs. INFO keeps startup/sync
 # messages visible without the noise of DEBUG.
@@ -28,7 +29,13 @@ if not token:
     # raise an opaque login error later.
     sys.exit("DISCORD_TOKEN is not set. Copy .env.example to .env and fill it in.")
 
+# Optional: roles (by name, comma-separated) allowed to use the admin commands
+# in addition to Manage Server, e.g. ADMIN_ROLES=Moderator,Officers.
+admin_roles = parse_admin_roles(os.getenv("ADMIN_ROLES"))
+if admin_roles:
+    logging.getLogger(__name__).info("Admin roles configured: %d", len(admin_roles))
+
 # Construct the bot and hand control to discord.py's event loop. ``run`` blocks
 # until the process is stopped.
-bot = TadokuBot()
+bot = TadokuBot(admin_roles=admin_roles)
 bot.run(token)

@@ -17,11 +17,13 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from lib.permissions import NotAdmin
+
 _log = logging.getLogger(__name__)
 
 
 class TadokuBot(commands.Bot):
-    def __init__(self, cog_folder: str = "cogs"):
+    def __init__(self, cog_folder: str = "cogs", admin_roles: set[str] | None = None):
         # This bot only uses slash commands and only reads public data, so it
         # needs no privileged intents. Sticking to the default intents means
         # the bot works without ticking "Message Content" / "Server Members"
@@ -40,6 +42,9 @@ class TadokuBot(commands.Bot):
             help_command=None,
         )
         self.cog_folder = cog_folder
+        # Casefolded names of roles that may use the admin commands, in addition
+        # to Manage Server. Read by lib.permissions.is_admin via interaction.client.
+        self.admin_roles: set[str] = admin_roles or set()
         # Created in setup_hook (needs a running event loop) and shared by every
         # cog via ``self.bot.session``; closed in ``close()``.
         self.session: aiohttp.ClientSession | None = None
@@ -110,8 +115,13 @@ class TadokuBot(commands.Bot):
         # logging so the log shows the actual failure, not the wrapper.
         original = getattr(error, "original", error)
 
-        if isinstance(error, app_commands.MissingPermissions):
-            # Raised by the has_permissions(manage_guild=True) check on /set_contest.
+        if isinstance(error, NotAdmin):
+            # Raised by lib.permissions.is_admin on the admin commands.
+            message = (
+                "You need the **Manage Server** permission or an authorized role "
+                "to use this command."
+            )
+        elif isinstance(error, app_commands.MissingPermissions):
             message = "You need the **Manage Server** permission to use this command."
         elif isinstance(error, app_commands.CommandOnCooldown):
             message = f"This command is on cooldown. Try again in {int(error.retry_after)}s."

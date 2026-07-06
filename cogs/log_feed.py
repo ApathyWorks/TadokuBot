@@ -21,6 +21,7 @@ from discord.ext import commands, tasks
 import cogs.leaderboard as leaderboard
 import lib.config_store as config_store
 import lib.tadoku_client as tadoku
+from lib.permissions import is_admin
 
 _log = logging.getLogger(__name__)
 
@@ -194,15 +195,17 @@ class LogFeed(commands.Cog):
 
     # -- commands -----------------------------------------------------------
 
+    # Access is enforced at runtime by is_admin() on each subcommand (Manage
+    # Server or an ADMIN_ROLES role), not by static default_permissions.
     log_group = app_commands.Group(
         name="log",
         description="Live feed of new contest logs to a channel.",
         guild_only=True,
-        default_permissions=discord.Permissions(manage_guild=True),
     )
 
     @log_group.command(name="on", description="Start posting new contest logs to a channel.")
     @app_commands.describe(channel="Channel to post new logs in (defaults to this channel).")
+    @is_admin()
     async def log_on(
         self, interaction: discord.Interaction, channel: Optional[discord.TextChannel] = None
     ):
@@ -228,6 +231,7 @@ class LogFeed(commands.Cog):
         )
 
     @log_group.command(name="off", description="Stop the live log feed for this server.")
+    @is_admin()
     async def log_off(self, interaction: discord.Interaction):
         """Disable the live log feed (leaves the contest pin untouched)."""
         config_store.set_guild_logfeed(interaction.guild_id, enabled=False)
@@ -236,6 +240,7 @@ class LogFeed(commands.Cog):
         )
 
     @log_group.command(name="status", description="Show whether the live log feed is on, and where.")
+    @is_admin()
     async def log_status(self, interaction: discord.Interaction):
         """Report whether the feed is enabled and which channel it posts to."""
         settings = config_store.get_guild_logfeed(interaction.guild_id)

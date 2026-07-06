@@ -19,6 +19,7 @@ from discord.ext import commands
 
 import lib.config_store as config_store
 import lib.tadoku_client as tadoku
+from lib.permissions import is_admin
 
 
 class Admin(commands.Cog):
@@ -66,8 +67,8 @@ class Admin(commands.Cog):
     @app_commands.autocomplete(contest=_contest_autocomplete)
     # Only meaningful in a server (the pin is per-guild), never in DMs.
     @app_commands.guild_only()
-    # Gate on Discord's own permission model -- only server managers may repin.
-    @app_commands.checks.has_permissions(manage_guild=True)
+    # Manage Server, or a role named in ADMIN_ROLES, may repin.
+    @is_admin()
     async def set_contest(self, interaction: discord.Interaction, contest: str):
         """Pin this server's leaderboard to the chosen contest id.
 
@@ -131,7 +132,7 @@ class Admin(commands.Cog):
     )
     @app_commands.guild_only()
     # Server-wide behaviour change, so gate it like /set_contest.
-    @app_commands.checks.has_permissions(manage_guild=True)
+    @is_admin()
     async def shame(self, interaction: discord.Interaction, enabled: Optional[bool] = None):
         """Turn this server's ``/weeklyleaderboard`` shame list on or off.
 

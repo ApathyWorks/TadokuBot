@@ -9,9 +9,7 @@ configured-vs-fallback replies.
 
 from unittest.mock import AsyncMock
 
-import discord
 import pytest
-from discord.app_commands import MissingPermissions
 
 import cogs.admin as admin_cog
 import lib.config_store as config_store
@@ -107,24 +105,6 @@ async def test_set_contest_does_not_store_anything_on_api_error(fake_bot):
     assert "Couldn't find" in args[0]
 
 
-async def test_set_contest_requires_manage_guild_permission():
-    cog_instance_stand_in = object()  # predicate only reads interaction.permissions
-    interaction = make_interaction(guild_id=999)
-    interaction.permissions = discord.Permissions.none()
-
-    [predicate] = admin_cog.Admin.set_contest.checks
-    with pytest.raises(MissingPermissions):
-        predicate(interaction)
-
-
-async def test_set_contest_permission_check_passes_with_manage_guild():
-    interaction = make_interaction(guild_id=999)
-    interaction.permissions = discord.Permissions(manage_guild=True)
-
-    [predicate] = admin_cog.Admin.set_contest.checks
-    assert predicate(interaction) is True
-
-
 # ---------------------------------------------------------------------------
 # /current_contest
 # ---------------------------------------------------------------------------
@@ -203,20 +183,3 @@ async def test_shame_turns_back_on_and_confirms(fake_bot):
     assert config_store.get_guild_shame(999) is True
     args, kwargs = interaction.response.send_message.await_args
     assert "on" in args[0]
-
-
-async def test_shame_requires_manage_guild_permission():
-    interaction = make_interaction(guild_id=999)
-    interaction.permissions = discord.Permissions.none()
-
-    [predicate] = admin_cog.Admin.shame.checks
-    with pytest.raises(MissingPermissions):
-        predicate(interaction)
-
-
-async def test_shame_permission_check_passes_with_manage_guild():
-    interaction = make_interaction(guild_id=999)
-    interaction.permissions = discord.Permissions(manage_guild=True)
-
-    [predicate] = admin_cog.Admin.shame.checks
-    assert predicate(interaction) is True

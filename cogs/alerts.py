@@ -28,6 +28,7 @@ from discord.ext import commands, tasks
 import cogs.leaderboard as leaderboard
 import lib.config_store as config_store
 import lib.tadoku_client as tadoku
+from lib.permissions import is_admin
 
 _log = logging.getLogger(__name__)
 
@@ -207,16 +208,18 @@ class Alerts(commands.Cog):
             else:
                 config_store.set_guild_alert(guild_id, kind, enabled=False)
 
-    # One group gates every subcommand behind Manage Server and guild-only.
+    # Guild-only group. Access (Manage Server or an ADMIN_ROLES role) is enforced
+    # at runtime by is_admin() on each subcommand -- not default_permissions,
+    # which is static and can't express "OR a named role".
     alerts_group = app_commands.Group(
         name="alerts",
         description="Automatic end-of-week / month / year leaderboard posts.",
         guild_only=True,
-        default_permissions=discord.Permissions(manage_guild=True),
     )
 
     @alerts_group.command(name="on", description="Turn on all leaderboard alerts, posting to a channel.")
     @app_commands.describe(channel="Channel to post the alerts in (defaults to this channel).")
+    @is_admin()
     async def alerts_on(
         self, interaction: discord.Interaction, channel: Optional[discord.TextChannel] = None
     ):
@@ -238,12 +241,14 @@ class Alerts(commands.Cog):
         )
 
     @alerts_group.command(name="off", description="Turn off all leaderboard alerts for this server.")
+    @is_admin()
     async def alerts_off(self, interaction: discord.Interaction):
         """Disable every alert (the contest pin and shame setting are untouched)."""
         self._set_all_alerts(interaction.guild_id, enabled=False)
         await interaction.response.send_message("✅ Alerts are now **off**.", ephemeral=True)
 
     @alerts_group.command(name="status", description="Show whether alerts are on, and where.")
+    @is_admin()
     async def alerts_status(self, interaction: discord.Interaction):
         """Report whether alerts are enabled and which channel they post to."""
         # All kinds share one switch/channel, so the weekly setting is representative.

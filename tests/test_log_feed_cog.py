@@ -302,6 +302,9 @@ async def test_log_status_reports_off():
     assert "off" in args[0]
 
 
-def test_log_group_requires_manage_guild():
-    perms = log_feed.LogFeed.log_group.default_permissions
-    assert perms is not None and perms.manage_guild is True
+def test_log_group_gates_at_runtime_not_via_default_permissions():
+    # Access is enforced by is_admin() on each subcommand (see test_permissions.py);
+    # no static default_permissions gate (it can't express "Manage Server OR a role").
+    assert log_feed.LogFeed.log_group.default_permissions is None
+    for cmd in (log_feed.LogFeed.log_on, log_feed.LogFeed.log_off, log_feed.LogFeed.log_status):
+        assert len(cmd.checks) == 1

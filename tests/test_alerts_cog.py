@@ -197,9 +197,13 @@ async def test_alerts_status_reports_off(fake_bot):
     assert "off" in args[0]
 
 
-def test_alerts_group_requires_manage_guild():
-    perms = alerts_cog.Alerts.alerts_group.default_permissions
-    assert perms is not None and perms.manage_guild is True
+def test_alerts_group_gates_at_runtime_not_via_default_permissions():
+    # Access is enforced by is_admin() on each subcommand (see test_permissions.py),
+    # so the group must NOT carry a static default_permissions gate (which can't
+    # express "Manage Server OR an authorized role").
+    assert alerts_cog.Alerts.alerts_group.default_permissions is None
+    for cmd in (alerts_cog.Alerts.alerts_on, alerts_cog.Alerts.alerts_off, alerts_cog.Alerts.alerts_status):
+        assert len(cmd.checks) == 1
 
 
 # ---------------------------------------------------------------------------
