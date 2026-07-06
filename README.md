@@ -6,17 +6,33 @@ logs or scores.
 
 ## Commands
 
+Run `/tadokubot` in Discord for this same list in-app. When the bot (re)starts, it also posts a
+one-time "I'm online — run `/tadokubot`" pointer to each server's log-feed channel (or, failing
+that, its alerts channel) — if neither is set, it stays quiet.
+
+### General commands
+
+Anyone can use these.
+
 | Command | Description |
 | --- | --- |
+| `/tadokubot` | Lists all of the bot's commands (this table). |
 | `/leaderboard [page] [language] [activity]` | Shows this server's configured contest leaderboard. Falls back to the latest official tadoku.app contest if nothing is configured. |
 | `/score username:<name>` | Looks up one person's rank and score in this server's current contest. `username` is their Tadoku display name; the person must be on that leaderboard (otherwise the bot says they aren't participating). |
 | `/weeklyleaderboard` | Ranks everyone by points logged in the **last 7 days** of this server's current contest. Tallied from the contest's individual logs (the API's own leaderboard is cumulative), so it's a rolling window ending now. When the shame setting is on (default), it also appends a call-out of everyone who has points in the contest but logged nothing in the last 7 days. |
 | `/monthlyleaderboard [month] [year]` | Like `/weeklyleaderboard`, but ranks points logged in a **calendar month**. With no arguments it shows the current month to date; pass `month` and/or `year` (e.g. `month:June year:2026`) to see a specific past month. Each defaults to the current one. Uses the same shame setting and call-out. |
-| `/set_contest contest:<search>` | **Manage Server** permission required. Picks which contest `/leaderboard` shows for this server, with autocomplete search over tadoku.app's contest list. |
 | `/current_contest` | Shows which contest this server is currently configured to display. |
-| `/shame [enabled]` | **Manage Server** permission required. Turns the shame call-out on `/weeklyleaderboard` and `/monthlyleaderboard` on or off for this server (default **on**). Run without `enabled` to see the current setting. |
-| `/alerts on [channel]` / `/alerts off` / `/alerts status` | **Manage Server** permission required. One switch for all automatic leaderboard posts. See below. |
-| `/log on [channel]` / `/log off` / `/log status` | **Manage Server** permission required. Live feed of new contest logs to a channel. See below. |
+
+### Admin commands (Manage Server)
+
+These require the **Manage Server** permission.
+
+| Command | Description |
+| --- | --- |
+| `/set_contest contest:<search>` | Picks which contest `/leaderboard` shows for this server, with autocomplete search over tadoku.app's contest list. |
+| `/shame [enabled]` | Turns the shame call-out on `/weeklyleaderboard` and `/monthlyleaderboard` on or off for this server (default **on**). Run without `enabled` to see the current setting. |
+| `/alerts on [channel]` / `/alerts off` / `/alerts status` | One switch for all automatic leaderboard posts. See [Scheduled alerts](#scheduled-alerts). |
+| `/log on [channel]` / `/log off` / `/log status` | Live feed of new contest logs to a channel. See [Live log feed](#live-log-feed). |
 
 ## Scheduled alerts
 
