@@ -59,3 +59,30 @@ async def test_render_card_tolerates_garbage_avatar_bytes():
         display_name="ruby", avatar_bytes=b"not-an-image", this_log="Reading  ·  1 Page  ·  +1 pts"
     )
     assert _valid_png(data).size == (profile_card.WIDTH, profile_card.HEIGHT)
+
+
+async def test_render_card_draws_a_japanese_title_without_error():
+    data = await profile_card.render_card(
+        display_name="strangefella",
+        this_log="Reading  ·  192 Page  ·  +192 pts",
+        title="奇跡を、生きている",
+    )
+    assert _valid_png(data).size == (profile_card.WIDTH, profile_card.HEIGHT)
+
+
+async def test_render_card_truncates_an_overlong_title():
+    # A very long title must not overflow the card; it just gets ellipsized.
+    data = await profile_card.render_card(
+        display_name="ruby", this_log="Reading  ·  1 Page  ·  +1 pts", title="タイトル" * 60
+    )
+    assert _valid_png(data).size == (profile_card.WIDTH, profile_card.HEIGHT)
+
+
+def test_truncate_shortens_text_that_is_too_wide():
+    from PIL import Image, ImageDraw
+
+    draw = ImageDraw.Draw(Image.new("RGB", (10, 10)))
+    font = profile_card._font(40)
+    out = profile_card._truncate(draw, "x" * 500, font, max_width=200)
+    assert out.endswith("…")
+    assert draw.textlength(out, font=font) <= 200

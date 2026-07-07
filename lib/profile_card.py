@@ -8,9 +8,9 @@ the avatar bytes and passes them in, so nothing here touches the network.
 
 The card is drawn at 2x and downsampled for antialiasing, and the (CPU-bound)
 render runs in a thread via ``render_card`` so it never blocks the event loop.
-Text is ASCII in practice (stats, English activity/unit names, romaji handles);
-CJK material titles ride along in the Discord message text, not on the image, so
-a CJK font isn't required.
+The material title (often Japanese) is drawn in the card's log callout, so the
+font cascade prefers a CJK-capable face (Noto Sans CJK / Yu Gothic / …); without
+one, CJK text falls back to tofu boxes.
 """
 
 import asyncio
@@ -23,7 +23,7 @@ from PIL import Image, ImageDraw, ImageFont
 # then the canvas is downsampled back to logical size for crisp antialiasing.
 SCALE = 2
 WIDTH = 960
-HEIGHT = 360
+HEIGHT = 388
 
 # Palette (from the reference card): warm cream ground, dark ink, purple accent.
 BG = (251, 248, 241)
@@ -35,14 +35,27 @@ CALLOUT_BG = (247, 242, 230)
 ACCENT = (88, 70, 150)
 PLACEHOLDER_BG = (232, 226, 212)
 
-# Font file candidates, best first, per weight. Bundled/system DejaVu (Linux, and
-# the Docker image installs it) or Arial/Segoe (Windows); ``load_default`` is the
-# guaranteed last resort so rendering never fails for lack of a font.
+# Font file candidates, best first, per weight. CJK-capable faces come first
+# (they cover Latin *and* Japanese, so material titles render) -- Noto Sans CJK on
+# Linux/Docker, Yu Gothic / Meiryo / MS Gothic on Windows, Hiragino on macOS --
+# then Latin-only fallbacks, then ``load_default`` so rendering never fails for
+# lack of a font. (Without a CJK face a Japanese title falls back to tofu boxes.)
 _FONT_FILES = {
-    False: ["DejaVuSans.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "arial.ttf",
-            "/System/Library/Fonts/Supplemental/Arial.ttf"],
-    True: ["DejaVuSans-Bold.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", "arialbd.ttf",
-           "/System/Library/Fonts/Supplemental/Arial Bold.ttf"],
+    False: [
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+        "C:/Windows/Fonts/YuGothR.ttc", "C:/Windows/Fonts/meiryo.ttc", "C:/Windows/Fonts/msgothic.ttc",
+        "/System/Library/Fonts/ヒラギノ角ゴシック W3.ttc",
+        "DejaVuSans.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "arial.ttf",
+        "/System/Library/Fonts/Supplemental/Arial.ttf",
+    ],
+    True: [
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
+        "/usr/share/fonts/truetype/noto/NotoSansCJK-Bold.ttc",
+        "C:/Windows/Fonts/YuGothB.ttc", "C:/Windows/Fonts/meiryob.ttc", "C:/Windows/Fonts/msgothic.ttc",
+        "DejaVuSans-Bold.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", "arialbd.ttf",
+        "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+    ],
 }
 
 
@@ -54,6 +67,16 @@ def _font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont:
         except OSError:
             continue
     return ImageFont.load_default(size)
+
+
+def _truncate(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.FreeTypeFont, max_width: int) -> str:
+    """Trim ``text`` (adding an ellipsis) so it fits within ``max_width`` pixels."""
+    if draw.textlength(text, font=font) <= max_width:
+        return text
+    ell = "…"
+    while text and draw.textlength(text + ell, font=font) > max_width:
+        text = text[:-1]
+    return text + ell
 
 
 def _format_count(n: float) -> str:
@@ -111,6 +134,7 @@ def _render(
     pages: float,
     listening_hours: float,
     this_log: str,
+    title: str,
 ) -> bytes:
     """Compose the card and return PNG bytes (runs on a worker thread)."""
     S = SCALE
@@ -154,17 +178,28 @@ def _render(
         x0 = content_x + i * (panel_w + gap)
         _draw_stat(draw, (x0, row_y, x0 + panel_w, row_y + panel_h), label, value)
 
-    # "This log" callout with its own accent stripe.
+    # "This log" callout with its own accent stripe. When there's a material
+    # title it sits on top (quoted) with the log line beneath; otherwise the log
+    # line is centred on its own.
     call_y0 = row_y + panel_h + 16 * S
-    call_box = (content_x, call_y0, right, call_y0 + 56 * S)
+    call_h = 84 * S
+    call_box = (content_x, call_y0, right, call_y0 + call_h)
     draw.rounded_rectangle(call_box, radius=10 * S, fill=CALLOUT_BG, outline=HAIRLINE, width=S)
-    draw.rounded_rectangle((content_x, call_y0, content_x + 6 * S, call_y0 + 56 * S), radius=3 * S, fill=ACCENT)
-    draw.text(
-        (content_x + 20 * S, call_y0 + 17 * S),
-        this_log,
-        font=_font(20 * S, bold=True),
-        fill=INK,
-    )
+    draw.rounded_rectangle((content_x, call_y0, content_x + 6 * S, call_y0 + call_h), radius=3 * S, fill=ACCENT)
+
+    text_x = content_x + 20 * S
+    text_w = right - text_x - 16 * S
+    if title:
+        title_font = _font(22 * S)
+        log_font = _font(18 * S, bold=True)
+        draw.text((text_x, call_y0 + 14 * S), _truncate(draw, f"「{title}」", title_font, text_w),
+                  font=title_font, fill=INK)
+        draw.text((text_x, call_y0 + 50 * S), _truncate(draw, this_log, log_font, text_w),
+                  font=log_font, fill=INK_SOFT)
+    else:
+        log_font = _font(20 * S, bold=True)
+        draw.text((text_x, call_y0 + 30 * S), _truncate(draw, this_log, log_font, text_w),
+                  font=log_font, fill=INK)
 
     # Downsample for antialiasing, flatten onto transparency-friendly RGBA PNG.
     img = img.resize((WIDTH, HEIGHT), Image.LANCZOS)
@@ -182,8 +217,10 @@ async def render_card(
     pages: float = 0,
     listening_hours: float = 0,
     this_log: str = "",
+    title: str = "",
 ) -> bytes:
     """Render the profile card off the event loop; returns PNG bytes."""
     return await asyncio.to_thread(
-        _render, display_name, subtitle, avatar_bytes, characters, pages, listening_hours, this_log
+        _render, display_name, subtitle, avatar_bytes, characters, pages, listening_hours,
+        this_log, title,
     )

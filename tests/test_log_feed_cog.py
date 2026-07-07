@@ -306,7 +306,7 @@ async def test_poll_renders_image_card_for_claimed_logger():
     assert tadoku_client.list_user_logs.await_args.args[1] == "uuid-ruby"
 
 
-async def test_poll_card_carries_material_title_as_message_content():
+async def test_poll_card_draws_the_material_title_on_the_card():
     channel = _channel(cid=555)
     bot = _bot_with_channel(channel)
     bot.get_user = lambda uid: _user_with_avatar() if uid == 111 else None
@@ -320,8 +320,9 @@ async def test_poll_card_carries_material_title_as_message_content():
 
     await cog._poll_guild(999)
 
-    # content is passed positionally to channel.send(content, embed=, file=).
-    assert channel.send.await_args.args[0] == "「奇跡を、生きている」"
+    # Title goes to the renderer (drawn on the card), not the message content.
+    assert profile_card.render_card.await_args.kwargs["title"] == "奇跡を、生きている"
+    assert channel.send.await_args.args[0] is None  # no message content
     assert isinstance(_sent(channel)["file"], discord.File)
 
 

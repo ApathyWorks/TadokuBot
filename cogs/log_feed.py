@@ -236,9 +236,8 @@ class LogFeed(commands.Cog):
     ) -> dict:
         """Build the ``send`` kwargs for one log.
 
-        A claimed logger whose lifetime stats we can fetch gets the rendered
-        image profile card (``file=``), with any material title carried in the
-        message ``content`` (so CJK titles render via Discord, not on the image).
+        A claimed logger whose lifetime stats we can fetch gets the rendered image
+        profile card (``file=``) -- the material title is drawn on the card itself.
         Everyone else -- and a claimed logger whose lifetime lookup fails -- gets
         the plain embed card.
         """
@@ -256,12 +255,10 @@ class LogFeed(commands.Cog):
                     pages=lifetime["pages"],
                     listening_hours=lifetime["minutes"] / 60,
                     this_log=_this_log_line(log),
+                    # The material title now lives on the card (in the log callout).
+                    title=(log.get("description") or "").strip(),
                 )
-                message = {"file": discord.File(io.BytesIO(png), filename="log.png")}
-                title = (log.get("description") or "").strip()
-                if title:
-                    message["content"] = f"「{title}」"
-                return message
+                return {"file": discord.File(io.BytesIO(png), filename="log.png")}
 
         return {"embed": _format_log_embed(log)}
 
