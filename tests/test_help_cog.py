@@ -44,7 +44,7 @@ async def test_tadokubot_replies_with_grouped_ephemeral_embed(fake_bot):
 
 def test_admin_commands_are_the_manage_server_ones():
     admin_names = {n.lstrip("/").split()[0] for n, _ in help_cog.ADMIN_COMMANDS}
-    assert admin_names == {"set_contest", "shame", "alerts", "log"}
+    assert admin_names == {"set_contest", "shame", "alerts", "log", "autoclaim"}
 
 
 async def test_help_catalogue_covers_every_registered_command(monkeypatch):
@@ -54,7 +54,8 @@ async def test_help_catalogue_covers_every_registered_command(monkeypatch):
     monkeypatch.setattr(tasks.Loop, "start", lambda self, *a, **k: None)
     bot = commands.Bot(command_prefix="!", intents=discord.Intents.default())
     for ext in (
-        "cogs.leaderboard", "cogs.admin", "cogs.alerts", "cogs.log_feed", "cogs.help_command"
+        "cogs.leaderboard", "cogs.admin", "cogs.alerts", "cogs.log_feed",
+        "cogs.claims", "cogs.help_command",
     ):
         await bot.load_extension(ext)
 

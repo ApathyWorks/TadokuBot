@@ -30,6 +30,9 @@ GENERAL_COMMANDS = [
     ("/weeklyleaderboard", "Ranking of points logged in the last 7 days."),
     ("/monthlyleaderboard", "Ranking of points logged in a calendar month."),
     ("/current_contest", "Which contest this server is currently set to."),
+    ("/claim", "Link your Discord account to your tadoku.app username."),
+    ("/unclaim", "Remove the username you claimed."),
+    ("/unclaimedlist", "List contest participants nobody has claimed yet."),
 ]
 
 ADMIN_COMMANDS = [
@@ -37,6 +40,7 @@ ADMIN_COMMANDS = [
     ("/shame", "Toggle the weekly \"logged nothing\" call-out."),
     ("/alerts on|off|status", "Automatic weekly / monthly / year-end leaderboard posts."),
     ("/log on|off|status", "Live feed of new contest logs to a channel."),
+    ("/autoclaim", "Auto-link participants to same-named Discord members."),
 ]
 
 

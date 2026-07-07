@@ -234,3 +234,52 @@ def guilds_with_logfeed() -> list[int]:
     ``enabled``).
     """
     return [int(gid) for gid, entry in _read().items() if entry.get("logfeed")]
+
+
+# ---------------------------------------------------------------------------
+# Tadoku-username <-> Discord-user claims (the /claim command family)
+# ---------------------------------------------------------------------------
+
+
+def get_guild_claims(guild_id: int) -> dict[str, str]:
+    """Return a guild's claim map: ``{discord_user_id_str: tadoku_username}``.
+
+    A copy, so callers can read/iterate freely without mutating stored state.
+    Missing/never-claimed guilds return an empty dict. Enforcing "one claim per
+    user, each username claimed once" is the caller's job (the ``claims`` cog),
+    which reads this map to check both directions before writing.
+    """
+    entry = _read().get(str(guild_id)) or {}
+    return dict(entry.get("claims") or {})
+
+
+def set_claim(guild_id: int, user_id: int, username: str) -> None:
+    """Link a Discord user to a tadoku username, preserving the guild's other keys.
+
+    Overwrites any previous claim for ``user_id``; callers that require "one claim
+    per user" check first. The username is stored as given (typically the
+    leaderboard's canonical spelling) so it can be displayed verbatim.
+    """
+    data = _read()
+    entry = data.get(str(guild_id), {})
+    entry.setdefault("claims", {})[str(user_id)] = username
+    data[str(guild_id)] = entry
+    _write(data)
+
+
+def remove_claim(guild_id: int, user_id: int) -> str | None:
+    """Drop ``user_id``'s claim; return the username removed, or ``None`` if none.
+
+    Returning the freed username lets the caller confirm exactly what was
+    unclaimed. A no-op (user had no claim) leaves the file untouched.
+    """
+    data = _read()
+    entry = data.get(str(guild_id))
+    if not entry:
+        return None
+    claims = entry.get("claims") or {}
+    removed = claims.pop(str(user_id), None)
+    if removed is not None:
+        data[str(guild_id)] = entry
+        _write(data)
+    return removed

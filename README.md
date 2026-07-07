@@ -22,6 +22,9 @@ Anyone can use these.
 | `/weeklyleaderboard` | Ranks everyone by points logged in the **last 7 days** of this server's current contest. Tallied from the contest's individual logs (the API's own leaderboard is cumulative), so it's a rolling window ending now. When the shame setting is on (default), it also appends a call-out of everyone who has points in the contest but logged nothing in the last 7 days. |
 | `/monthlyleaderboard [month] [year]` | Like `/weeklyleaderboard`, but ranks points logged in a **calendar month**. With no arguments it shows the current month to date; pass `month` and/or `year` (e.g. `month:June year:2026`) to see a specific past month. Each defaults to the current one. Uses the same shame setting and call-out. |
 | `/current_contest` | Shows which contest this server is currently configured to display. |
+| `/claim username:<name>` | Links your Discord account to your tadoku.app username (the person must be on the current contest's leaderboard). One claim per member, and each username can be claimed only once. See [Discord ↔ Tadoku matching](#discord--tadoku-matching). |
+| `/unclaim` | Removes the username you claimed, freeing it for anyone else. |
+| `/unclaimedlist` | Lists the current contest's participants that nobody has claimed yet. |
 
 ### Admin commands (Manage Server)
 
@@ -35,6 +38,7 @@ reject unauthorized users with an ephemeral message.
 | `/shame [enabled]` | Turns the shame call-out on `/weeklyleaderboard` and `/monthlyleaderboard` on or off for this server (default **on**). Run without `enabled` to see the current setting. |
 | `/alerts on [channel]` / `/alerts off` / `/alerts status` | One switch for all automatic leaderboard posts. See [Scheduled alerts](#scheduled-alerts). |
 | `/log on [channel]` / `/log off` / `/log status` | Live feed of new contest logs to a channel. See [Live log feed](#live-log-feed). |
+| `/autoclaim` | Bulk-links every current-contest participant to the Discord member of the same name. See [Discord ↔ Tadoku matching](#discord--tadoku-matching). |
 
 ## Scheduled alerts
 
@@ -65,6 +69,22 @@ keeps it from repeating. A burst is capped per poll with an "…and N more" note
 `/log status` shows the channel. Defaults to the channel you run `/log on` in, and the bot must be
 able to post there.
 
+## Discord ↔ Tadoku matching
+
+The bot can remember which Discord member is which tadoku.app participant, per server. The mapping
+is two-way unique: **each member claims at most one username, and each username is claimed by at most
+one member** (matching is case- and whitespace-insensitive, like `/score`).
+
+- **`/autoclaim`** (admin) does the bulk work: for every participant in the current contest it looks
+  up a Discord member of the same name (username, nickname, or global name) and links them. It only
+  pairs an *unambiguous* match — a name that matches zero or multiple members is skipped rather than
+  guessed — and never overwrites an existing claim. The member lookup uses Discord's name search, so
+  no privileged intents are required.
+- **`/claim username`** is the manual fallback for anyone `/autoclaim` couldn't match (e.g. their
+  Discord name differs from their Tadoku name). It refuses a username that isn't on the leaderboard,
+  one already claimed by someone else, or a second claim by a member who already has one.
+- **`/unclaim`** frees your username; **`/unclaimedlist`** shows who's still unmatched.
+
 ## Setup
 
 1. Install dependencies:
@@ -92,9 +112,10 @@ new/changed commands to clients.
 ## Local state
 
 The only thing persisted locally is `data/config.json`, a per-server mapping of settings: which
-contest `/leaderboard` should display, whether the shame call-out is on, and each server's alert
+contest `/leaderboard` should display, whether the shame call-out is on, each server's alert
 settings (enabled, target channel, and the last period posted for each of the weekly/monthly/yearly
-alerts). Everything else (contest details, scores, rankings) is fetched live from
+alerts), the log-feed settings, and the Discord-member ↔ Tadoku-username claims. Everything else
+(contest details, scores, rankings) is fetched live from
 `https://tadoku.app/api/internal/immersion/`.
 
 ## Running tests

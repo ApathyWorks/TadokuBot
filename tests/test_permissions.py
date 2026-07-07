@@ -11,6 +11,7 @@ import pytest
 
 import cogs.admin as admin_cog
 import cogs.alerts as alerts_cog
+import cogs.claims as claims_cog
 import cogs.log_feed as log_feed_cog
 from lib.permissions import NotAdmin, parse_admin_roles, user_is_admin
 
@@ -72,6 +73,7 @@ ADMIN_COMMANDS = [
     log_feed_cog.LogFeed.log_on,
     log_feed_cog.LogFeed.log_off,
     log_feed_cog.LogFeed.log_status,
+    claims_cog.Claims.autoclaim,
 ]
 
 

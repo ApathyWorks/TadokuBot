@@ -258,3 +258,71 @@ def test_guilds_with_logfeed_lists_only_configured_guilds():
 def test_set_logfeed_rejects_unknown_field():
     with pytest.raises(ValueError):
         config_store.set_guild_logfeed(1, bogus=True)
+
+
+# ---------------------------------------------------------------------------
+# Claims (Discord user <-> tadoku username)
+# ---------------------------------------------------------------------------
+
+
+def test_get_guild_claims_defaults_to_empty():
+    assert config_store.get_guild_claims(1) == {}
+
+
+def test_set_and_get_claim_round_trip():
+    config_store.set_claim(1, 111, "ruby")
+
+    assert config_store.get_guild_claims(1) == {"111": "ruby"}
+
+
+def test_set_claim_overwrites_same_user():
+    config_store.set_claim(1, 111, "ruby")
+    config_store.set_claim(1, 111, "ryun")
+
+    assert config_store.get_guild_claims(1) == {"111": "ryun"}
+
+
+def test_remove_claim_returns_freed_username():
+    config_store.set_claim(1, 111, "ruby")
+
+    assert config_store.remove_claim(1, 111) == "ruby"
+    assert config_store.get_guild_claims(1) == {}
+
+
+def test_remove_claim_returns_none_when_absent():
+    assert config_store.remove_claim(1, 111) is None
+    # A user without a claim in a guild that has other claims.
+    config_store.set_claim(1, 222, "ryun")
+    assert config_store.remove_claim(1, 111) is None
+
+
+def test_claims_are_per_guild():
+    config_store.set_claim(1, 111, "ruby")
+    config_store.set_claim(2, 111, "ryun")
+
+    assert config_store.get_guild_claims(1) == {"111": "ruby"}
+    assert config_store.get_guild_claims(2) == {"111": "ryun"}
+
+
+def test_claims_preserve_contest_and_other_sections():
+    config_store.set_guild_contest(1, "contest-a", "Contest A")
+    config_store.set_guild_alert(1, "weekly", enabled=True, channel_id=7)
+    config_store.set_claim(1, 111, "ruby")
+
+    assert config_store.get_guild_contest(1)["contest_id"] == "contest-a"
+    assert config_store.get_guild_alert(1, "weekly")["channel_id"] == 7
+    assert config_store.get_guild_claims(1) == {"111": "ruby"}
+
+
+def test_setting_contest_preserves_claims():
+    config_store.set_claim(1, 111, "ruby")
+    config_store.set_guild_contest(1, "contest-a", "Contest A")
+
+    assert config_store.get_guild_claims(1) == {"111": "ruby"}
+
+
+def test_claims_only_guild_is_not_treated_as_having_a_contest():
+    # A guild that only has claims (no contest pinned) still reads as unset.
+    config_store.set_claim(1, 111, "ruby")
+
+    assert config_store.get_guild_contest(1) is None
