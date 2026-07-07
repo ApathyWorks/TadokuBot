@@ -1,6 +1,6 @@
 """Log-feed cog: the ``/log`` command group and the poller behind it.
 
-``/log on channel:#x`` (Manage Server) turns on a live feed: every 5 minutes the
+``/log on channel:#x`` (Manage Server) turns on a live feed: every minute the
 bot checks the server's current contest for new logs on tadoku.app and posts each
 one — who logged it, what they logged, and the points — to the chosen channel as
 an embed "card". If the logger has linked their Discord account via ``/claim``,
@@ -36,12 +36,12 @@ from lib.permissions import is_admin
 _log = logging.getLogger(__name__)
 
 # How often to poll tadoku.app for new logs.
-POLL_INTERVAL_MINUTES = 5
+POLL_INTERVAL_MINUTES = 1
 
 # Page size for fetching logs (the API caps this at 100).
 LOG_PAGE_SIZE = 100
 
-# Safety cap on pages scanned per guild per poll. At a 5-minute cadence far fewer
+# Safety cap on pages scanned per guild per poll. At a 1-minute cadence far fewer
 # than 100 new logs arrive, so page 0 almost always suffices; this just bounds a
 # pathological burst / a long outage catch-up.
 LOGFEED_MAX_PAGES = 5
@@ -417,7 +417,7 @@ class LogFeed(commands.Cog):
         )
         await interaction.response.send_message(
             f"✅ Live log feed is **on** in {target.mention}. New logs in this server's contest "
-            f"will appear here within ~{POLL_INTERVAL_MINUTES} minutes.",
+            f"will appear here within about a minute.",
             ephemeral=True,
         )
 

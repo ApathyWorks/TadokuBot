@@ -59,8 +59,8 @@ can't send to.
 
 ## Live log feed
 
-`/log on channel:#somewhere` turns on a live feed of the server's current contest: every **5
-minutes** the bot checks tadoku.app for new logs and posts each one — who logged it, what they
+`/log on channel:#somewhere` turns on a live feed of the server's current contest: every **1
+minute** the bot checks tadoku.app for new logs and posts each one — who logged it, what they
 logged (activity, amount, title, language), and the points — to the channel as an embed **card**,
 one per log, colour-coded by activity.
 

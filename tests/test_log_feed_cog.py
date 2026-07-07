@@ -1,4 +1,4 @@
-"""Tests for the log-feed cog (the /log group + the 5-minute poller).
+"""Tests for the log-feed cog (the /log group + the 1-minute poller).
 
 The tadoku client and the contest resolver are mocked; the poller's testable
 core ``_poll_guild`` is driven directly with injected logs and a fixed
