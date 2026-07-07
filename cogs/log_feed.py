@@ -8,9 +8,9 @@ the card carries their Discord avatar.
 
 If the logger has linked their Discord account via ``/claim``, the log posts as a
 rendered image **profile card** (see ``lib.profile_card``): their Discord avatar,
-their all-time immersion stats (characters, pages, listening hours — summed live
-from tadoku.app's per-user log history), and this log. Everyone else gets the
-plain embed card.
+their immersion stats since the start of 2026 (characters, pages, listening hours
+— summed live from tadoku.app's per-user log history), and this log. Everyone
+else gets the plain embed card.
 
 The poller keeps a per-guild ``last_seen`` high-water mark (the ``created_at`` of
 the newest log already posted) so it never repeats a log or dumps a backlog: on
@@ -50,10 +50,14 @@ LOGFEED_MAX_PAGES = 5
 # "…and N more" trailer, so a burst can't flood the channel.
 MAX_POSTS_PER_POLL = 20
 
-# Safety cap on pages walked when summing a user's whole log history for the
-# lifetime stats. 50 x 100 = 5,000 logs covers any realistic member; it just
-# bounds the pathological case (and the cost, since this runs per claimed logger).
+# Safety cap on pages walked when summing a user's log history for the profile
+# stats. 50 x 100 = 5,000 logs covers any realistic member; it just bounds the
+# pathological case (and the cost, since this runs per claimed logger).
 LIFETIME_MAX_PAGES = 50
+
+# The profile card's stats are summed from this date forward (not truly all-time):
+# everything logged since the start of 2026, accumulating going ahead.
+LIFETIME_START = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
 # Emoji per activity name, with a neutral fallback.
 _ACTIVITY_EMOJI = {"Reading": "📖", "Listening": "🎧"}
@@ -249,7 +253,7 @@ class LogFeed(commands.Cog):
                 avatar_bytes = await self._avatar_bytes_for_id(claimer, avatar_cache)
                 png = await profile_card.render_card(
                     display_name=name,
-                    subtitle="Immersion profile",
+                    subtitle="Immersion since 2026",
                     avatar_bytes=avatar_bytes,
                     characters=lifetime["characters"],
                     pages=lifetime["pages"],
@@ -284,12 +288,15 @@ class LogFeed(commands.Cog):
         return stats
 
     async def _compute_lifetime(self, user_id: str) -> dict:
-        """Sum a user's whole log history into characters / pages / listening minutes.
+        """Sum a user's logs since ``LIFETIME_START`` into characters / pages /
+        listening minutes.
 
         Buckets each non-deleted log by its unit: anything with "character" in the
         unit name counts as characters, "page" as pages (covers "Comic page"), and
-        "minute" as listening minutes ("Minute"/"Dense minute"). Pages the API by
-        ``total_size``, bounded by ``LIFETIME_MAX_PAGES``.
+        "minute" as listening minutes ("Minute"/"Dense minute"). Logs arrive
+        newest-first, so the first one before ``LIFETIME_START`` ends the walk
+        (everything older is out of window). Pages the API by ``total_size``,
+        bounded by ``LIFETIME_MAX_PAGES``.
         """
         characters = pages = minutes = 0.0
         for page in range(LIFETIME_MAX_PAGES):
@@ -298,6 +305,9 @@ class LogFeed(commands.Cog):
             )
             logs = data.get("logs", [])
             for log in logs:
+                # Newest-first: a log before the window means we're done entirely.
+                if leaderboard._parse_timestamp(log["created_at"]) < LIFETIME_START:
+                    return {"characters": characters, "pages": pages, "minutes": minutes}
                 if log.get("deleted"):
                     continue
                 unit = (log.get("unit_name") or "").lower()

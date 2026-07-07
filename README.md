@@ -65,10 +65,11 @@ logged (activity, amount, title, language), and the points — to the channel as
 one per log, colour-coded by activity.
 
 If the logger has linked their Discord account with [`/claim`](#discord--tadoku-matching), the log
-instead posts as a rendered **profile card image**: their Discord avatar, their **all-time immersion
-stats** (characters, pages, listening hours), and the log they just made. Those lifetime totals are
-summed live from tadoku.app's full per-user log history (across every contest), so they reflect the
-member's real numbers — no local tally is kept. Unlinked loggers get the plain embed card.
+instead posts as a rendered **profile card image** (dark-themed): their Discord avatar, their
+**immersion stats since the start of 2026** (characters, pages, listening hours), and the log they
+just made. Those totals are summed live from tadoku.app's per-user log history (from 2026 onward,
+across every contest), so they reflect the member's real numbers — no local tally is kept. Unlinked
+loggers get the plain embed card.
 
 The card is drawn with Pillow, including the material title (often Japanese) — the Docker image
 installs `fonts-dejavu-core` and `fonts-noto-cjk` so both Latin and CJK render (a built-in font is

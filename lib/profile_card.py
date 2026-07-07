@@ -25,15 +25,16 @@ SCALE = 2
 WIDTH = 960
 HEIGHT = 388
 
-# Palette (from the reference card): warm cream ground, dark ink, purple accent.
-BG = (251, 248, 241)
-INK = (28, 27, 42)
-INK_SOFT = (88, 84, 110)
-HAIRLINE = (216, 210, 196)
-PANEL_BG = (243, 238, 224)
-CALLOUT_BG = (247, 242, 230)
-ACCENT = (88, 70, 150)
-PLACEHOLDER_BG = (232, 226, 212)
+# Palette: a dark charcoal ground with near-white ink and a purple accent, so the
+# card reads comfortably (and doesn't glare) in a Discord channel.
+BG = (30, 31, 38)
+INK = (236, 237, 242)
+INK_SOFT = (150, 152, 166)
+HAIRLINE = (56, 58, 68)
+PANEL_BG = (40, 42, 51)
+CALLOUT_BG = (44, 46, 56)
+ACCENT = (150, 128, 226)
+PLACEHOLDER_BG = (58, 60, 72)
 
 # Font file candidates, best first, per weight. CJK-capable faces come first
 # (they cover Latin *and* Japanese, so material titles render) -- Noto Sans CJK on

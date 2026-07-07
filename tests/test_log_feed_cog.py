@@ -285,7 +285,8 @@ async def test_poll_renders_image_card_for_claimed_logger():
         _log("2026-07-05T21:00:00Z", name="Ruby ", user_id="uuid-ruby", amount=192, unit="Page", score=192),
     ]})
     tadoku_client.list_user_logs.return_value = {
-        "logs": [{"unit_name": "Character", "amount": 6_600_000, "deleted": False}],
+        "logs": [{"unit_name": "Character", "amount": 6_600_000, "deleted": False,
+                  "created_at": "2026-07-05T20:00:00Z"}],
         "total_size": 1,
     }
     cog = log_feed.LogFeed(bot)
@@ -403,20 +404,28 @@ async def test_poll_card_uses_placeholder_when_avatar_read_fails():
 
 
 # ---------------------------------------------------------------------------
-# lifetime stats (_compute_lifetime)
+# stats since 2026 (_compute_lifetime)
 # ---------------------------------------------------------------------------
+
+# A timestamp comfortably inside the window (>= 2026-01-01).
+IN_WINDOW = "2026-07-05T20:00:00Z"
+
+
+def _ulog(unit, amount, deleted=False, created_at=IN_WINDOW):
+    return {"unit_name": unit, "amount": amount, "deleted": deleted, "created_at": created_at}
+
 
 async def test_compute_lifetime_sums_by_unit_and_skips_deleted():
     cog = log_feed.LogFeed(SimpleNamespace(session=AsyncMock()))
     tadoku_client.list_user_logs.return_value = {
         "logs": [
-            {"unit_name": "Character", "amount": 1000, "deleted": False},
-            {"unit_name": "Page", "amount": 10, "deleted": False},
-            {"unit_name": "Comic page", "amount": 5, "deleted": False},   # counts as pages
-            {"unit_name": "Minute", "amount": 30, "deleted": False},
-            {"unit_name": "Dense minute", "amount": 60, "deleted": False},  # listening
-            {"unit_name": "Sentence", "amount": 99, "deleted": False},     # ignored (not requested)
-            {"unit_name": "Character", "amount": 500, "deleted": True},     # skipped
+            _ulog("Character", 1000),
+            _ulog("Page", 10),
+            _ulog("Comic page", 5),          # counts as pages
+            _ulog("Minute", 30),
+            _ulog("Dense minute", 60),        # listening
+            _ulog("Sentence", 99),            # ignored (not requested)
+            _ulog("Character", 500, deleted=True),  # skipped
         ],
         "total_size": 7,
     }
@@ -426,12 +435,30 @@ async def test_compute_lifetime_sums_by_unit_and_skips_deleted():
     assert stats == {"characters": 1000, "pages": 15, "minutes": 90}
 
 
+async def test_compute_lifetime_stops_before_2026():
+    # Newest-first: an in-window log, then one from 2025 which ends the walk (so a
+    # still-older in-window-looking entry after it is never counted).
+    cog = log_feed.LogFeed(SimpleNamespace(session=AsyncMock()))
+    tadoku_client.list_user_logs.return_value = {
+        "logs": [
+            _ulog("Page", 10, created_at="2026-01-02T00:00:00Z"),
+            _ulog("Page", 999, created_at="2025-12-31T23:59:59Z"),  # before 2026 -> stop
+            _ulog("Page", 999, created_at="2026-05-01T00:00:00Z"),  # never reached
+        ],
+        "total_size": 3,
+    }
+
+    stats = await cog._compute_lifetime("user-1")
+
+    assert stats == {"characters": 0, "pages": 10, "minutes": 0}
+
+
 async def test_compute_lifetime_pages_until_total_reached():
     cog = log_feed.LogFeed(SimpleNamespace(session=AsyncMock()))
-    full = [{"unit_name": "Page", "amount": 1, "deleted": False} for _ in range(log_feed.LOG_PAGE_SIZE)]
+    full = [_ulog("Page", 1) for _ in range(log_feed.LOG_PAGE_SIZE)]
     pages = {
         0: {"logs": full, "total_size": log_feed.LOG_PAGE_SIZE + 1},
-        1: {"logs": [{"unit_name": "Page", "amount": 1, "deleted": False}], "total_size": log_feed.LOG_PAGE_SIZE + 1},
+        1: {"logs": [_ulog("Page", 1)], "total_size": log_feed.LOG_PAGE_SIZE + 1},
     }
 
     async def serve(session, user_id, *, page, page_size):
