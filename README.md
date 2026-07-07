@@ -61,8 +61,9 @@ can't send to.
 
 `/log on channel:#somewhere` turns on a live feed of the server's current contest: every **5
 minutes** the bot checks tadoku.app for new logs and posts each one — who logged it, what they
-logged (activity, amount, title, language), and the points — to the channel, one message per log
-(for example: `📖 **ruby** logged **192 Page** · Reading (Japanese) — 「奇跡を、生きている」 · **+192 pts**`).
+logged (activity, amount, title, language), and the points — to the channel as an embed **card**,
+one per log. The card is colour-coded by activity and, if the logger has linked their Discord
+account with [`/claim`](#discord--tadoku-matching), shows their Discord avatar next to their name.
 
 Only logs made *after* you run `/log on` are posted (no backlog dump); a per-server high-water mark
 keeps it from repeating. A burst is capped per poll with an "…and N more" note. `/log off` stops it;

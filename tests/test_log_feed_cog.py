@@ -9,6 +9,7 @@ interaction -- no live Discord, no wall clock, no live loop.
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import discord
 import pytest
 
 import cogs.leaderboard as leaderboard  # noqa: F401 -- patched indirectly via tadoku_client
@@ -56,36 +57,64 @@ def _bot_with_channel(channel):
     return bot
 
 
+def _user_with_avatar(url):
+    return SimpleNamespace(display_avatar=SimpleNamespace(url=url))
+
+
+def _http_error():
+    return discord.HTTPException(SimpleNamespace(status=503, reason="err"), "boom")
+
+
 # ---------------------------------------------------------------------------
-# _format_log
+# _format_log_embed
 # ---------------------------------------------------------------------------
 
-def test_format_log_includes_who_what_and_points():
-    line = log_feed._format_log(
+def _fields(embed):
+    return {f.name: f.value for f in embed.fields}
+
+
+def test_format_log_embed_includes_who_what_and_points():
+    embed = log_feed._format_log_embed(
         _log(CUTOFF, name="ruby ", score=192, amount=192, unit="Page",
              activity="Reading", language="Japanese", description="奇跡を、生きている")
     )
-    assert "ruby" in line and "ruby " not in line  # trailing space stripped
-    assert "192 Page" in line
-    assert "Reading (Japanese)" in line
-    assert "「奇跡を、生きている」" in line
-    assert "+192 pts" in line
+    assert embed.author.name == "ruby"  # trailing space stripped
+    assert "Reading" in embed.title
+    fields = _fields(embed)
+    assert fields["Amount"] == "192 Page"
+    assert fields["Language"] == "Japanese"
+    assert fields["Points"] == "+192"
+    assert "「奇跡を、生きている」" in embed.description
 
 
-def test_format_log_omits_title_when_absent():
-    line = log_feed._format_log(_log(CUTOFF, description=None))
-    assert "「" not in line
+def test_format_log_embed_omits_title_when_absent():
+    embed = log_feed._format_log_embed(_log(CUTOFF, description=None))
+    assert embed.description is None
 
 
-def test_format_log_drops_trailing_zero_on_points():
-    assert "+7.2 pts" in log_feed._format_log(_log(CUTOFF, score=7.2000003))
-    assert "+3 pts" in log_feed._format_log(_log(CUTOFF, score=3.0))
+def test_format_log_embed_omits_language_field_when_absent():
+    embed = log_feed._format_log_embed(_log(CUTOFF, language=None))
+    assert "Language" not in _fields(embed)
 
 
-def test_format_log_activity_emoji():
-    assert log_feed._format_log(_log(CUTOFF, activity="Reading")).startswith("📖")
-    assert log_feed._format_log(_log(CUTOFF, activity="Listening")).startswith("🎧")
-    assert log_feed._format_log(_log(CUTOFF, activity="Output")).startswith("📝")
+def test_format_log_embed_drops_trailing_zero_on_points():
+    assert _fields(log_feed._format_log_embed(_log(CUTOFF, score=7.2000003)))["Points"] == "+7.2"
+    assert _fields(log_feed._format_log_embed(_log(CUTOFF, score=3.0)))["Points"] == "+3"
+
+
+def test_format_log_embed_activity_emoji():
+    assert log_feed._format_log_embed(_log(CUTOFF, activity="Reading")).title.startswith("📖")
+    assert log_feed._format_log_embed(_log(CUTOFF, activity="Listening")).title.startswith("🎧")
+    assert log_feed._format_log_embed(_log(CUTOFF, activity="Output")).title.startswith("📝")
+
+
+def test_format_log_embed_sets_avatar_when_provided():
+    embed = log_feed._format_log_embed(_log(CUTOFF), avatar_url="https://cdn/ruby.png")
+    assert embed.author.icon_url == "https://cdn/ruby.png"
+
+
+def test_format_log_embed_has_no_avatar_by_default():
+    assert log_feed._format_log_embed(_log(CUTOFF)).author.icon_url is None
 
 
 # ---------------------------------------------------------------------------
@@ -108,8 +137,8 @@ async def test_poll_posts_new_logs_oldest_first_skipping_deleted():
     await cog._poll_guild(999)
 
     assert channel.send.await_count == 2  # "old" excluded, "gone" deleted
-    first, second = [c.args[0] for c in channel.send.await_args_list]
-    assert "early" in first and "late" in second  # chronological order
+    first, second = [c.kwargs["embed"] for c in channel.send.await_args_list]
+    assert first.author.name == "early" and second.author.name == "late"  # chronological
     # Marker advanced to the newest log.
     assert config_store.get_guild_logfeed(999)["last_seen"] == "2026-07-05T21:00:00Z"
 
@@ -129,7 +158,7 @@ async def test_poll_excludes_the_log_exactly_at_the_marker():
     await cog._poll_guild(999)
 
     assert channel.send.await_count == 1
-    assert "marker" not in channel.send.await_args_list[0].args[0]
+    assert channel.send.await_args_list[0].kwargs["embed"].author.name == "new"
 
 
 async def test_poll_does_nothing_when_no_new_logs():
@@ -218,6 +247,86 @@ async def test_poll_pages_past_a_full_page_to_reach_the_marker():
     await cog._poll_guild(999)
 
     assert tadoku_client.list_contest_logs.await_count == 2  # had to fetch page 1
+
+
+# ---------------------------------------------------------------------------
+# avatar on the card for claimed loggers
+# ---------------------------------------------------------------------------
+
+async def test_poll_uses_claimed_loggers_avatar():
+    channel = _channel(cid=555)
+    bot = _bot_with_channel(channel)
+    bot.get_user = lambda uid: _user_with_avatar("https://cdn/ruby.png") if uid == 111 else None
+    config_store.set_guild_logfeed(999, enabled=True, channel_id=555, last_seen=CUTOFF)
+    config_store.set_claim(999, 111, "ruby")  # links "ruby" -> discord user 111
+    tadoku_client.list_contest_logs.side_effect = _pager({0: [_log("2026-07-05T21:00:00Z", name="Ruby ")]})
+    cog = log_feed.LogFeed(bot)
+
+    await cog._poll_guild(999)
+
+    assert channel.send.await_args.kwargs["embed"].author.icon_url == "https://cdn/ruby.png"
+
+
+async def test_poll_fetches_user_when_not_cached():
+    channel = _channel(cid=555)
+    bot = _bot_with_channel(channel)
+    bot.get_user = lambda uid: None
+    bot.fetch_user = AsyncMock(return_value=_user_with_avatar("https://cdn/ruby.png"))
+    config_store.set_guild_logfeed(999, enabled=True, channel_id=555, last_seen=CUTOFF)
+    config_store.set_claim(999, 111, "ruby")
+    tadoku_client.list_contest_logs.side_effect = _pager({0: [_log("2026-07-05T21:00:00Z", name="ruby")]})
+    cog = log_feed.LogFeed(bot)
+
+    await cog._poll_guild(999)
+
+    bot.fetch_user.assert_awaited_once()
+    assert channel.send.await_args.kwargs["embed"].author.icon_url == "https://cdn/ruby.png"
+
+
+async def test_poll_no_avatar_for_unclaimed_logger():
+    channel = _channel(cid=555)
+    bot = _bot_with_channel(channel)  # no get_user needed: unclaimed short-circuits
+    config_store.set_guild_logfeed(999, enabled=True, channel_id=555, last_seen=CUTOFF)
+    tadoku_client.list_contest_logs.side_effect = _pager({0: [_log("2026-07-05T21:00:00Z", name="nobody")]})
+    cog = log_feed.LogFeed(bot)
+
+    await cog._poll_guild(999)
+
+    assert channel.send.await_args.kwargs["embed"].author.icon_url is None
+
+
+async def test_poll_tolerates_avatar_fetch_failure():
+    channel = _channel(cid=555)
+    bot = _bot_with_channel(channel)
+    bot.get_user = lambda uid: None
+    bot.fetch_user = AsyncMock(side_effect=_http_error())
+    config_store.set_guild_logfeed(999, enabled=True, channel_id=555, last_seen=CUTOFF)
+    config_store.set_claim(999, 111, "ruby")
+    tadoku_client.list_contest_logs.side_effect = _pager({0: [_log("2026-07-05T21:00:00Z", name="ruby")]})
+    cog = log_feed.LogFeed(bot)
+
+    await cog._poll_guild(999)  # must not raise
+
+    assert channel.send.await_args.kwargs["embed"].author.icon_url is None
+
+
+async def test_poll_resolves_a_repeat_loggers_avatar_only_once():
+    channel = _channel(cid=555)
+    bot = _bot_with_channel(channel)
+    bot.get_user = lambda uid: None
+    bot.fetch_user = AsyncMock(return_value=_user_with_avatar("https://cdn/ruby.png"))
+    config_store.set_guild_logfeed(999, enabled=True, channel_id=555, last_seen=CUTOFF)
+    config_store.set_claim(999, 111, "ruby")
+    tadoku_client.list_contest_logs.side_effect = _pager({0: [
+        _log("2026-07-05T21:05:00Z", name="ruby"),
+        _log("2026-07-05T21:00:00Z", name="ruby"),
+    ]})
+    cog = log_feed.LogFeed(bot)
+
+    await cog._poll_guild(999)
+
+    assert channel.send.await_count == 2  # both logs posted
+    bot.fetch_user.assert_awaited_once()  # but the avatar was resolved once (cached)
 
 
 # ---------------------------------------------------------------------------

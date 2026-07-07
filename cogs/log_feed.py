@@ -2,7 +2,9 @@
 
 ``/log on channel:#x`` (Manage Server) turns on a live feed: every 5 minutes the
 bot checks the server's current contest for new logs on tadoku.app and posts each
-one — who logged it, what they logged, and the points — to the chosen channel.
+one — who logged it, what they logged, and the points — to the chosen channel as
+an embed "card". If the logger has linked their Discord account via ``/claim``,
+the card carries their Discord avatar.
 
 The poller keeps a per-guild ``last_seen`` high-water mark (the ``created_at`` of
 the newest log already posted) so it never repeats a log or dumps a backlog: on
@@ -43,6 +45,13 @@ MAX_POSTS_PER_POLL = 20
 # Emoji per activity name, with a neutral fallback.
 _ACTIVITY_EMOJI = {"Reading": "📖", "Listening": "🎧"}
 
+# Accent colour per activity, so the cards are visually distinguishable at a
+# glance; anything unrecognised falls back to blurple.
+_ACTIVITY_COLOR = {
+    "Reading": discord.Color.blue(),
+    "Listening": discord.Color.purple(),
+}
+
 
 def _format_points(score) -> str:
     """Render a score without a pointless trailing ``.0`` (192, 7.2, 3)."""
@@ -59,25 +68,53 @@ def _language_name(log: dict) -> str:
     return language.get("name", "") if isinstance(language, dict) else (language or "")
 
 
-def _format_log(log: dict) -> str:
-    """Render one log as a single feed line: who, what, and points."""
+def _claimer_id(claims: dict[str, str], name: str) -> Optional[int]:
+    """Return the Discord id that claimed ``name`` (via /claim), or ``None``.
+
+    Folds names the same way /score and /claim do, so a leaderboard spelling like
+    "Ruby " matches a claim stored as "ruby".
+    """
+    target = leaderboard._normalize_name(name)
+    for uid, claimed in claims.items():
+        if leaderboard._normalize_name(claimed) == target:
+            return int(uid)
+    return None
+
+
+def _format_log_embed(log: dict, avatar_url: Optional[str] = None) -> discord.Embed:
+    """Render one log as an embed "card": who, what, and points.
+
+    Carries the same information as the old one-line text (logger, activity,
+    amount + unit, language, optional material title, points) laid out as an
+    author line + fields. ``avatar_url`` (the logger's Discord avatar, when they
+    have claimed the username) is shown beside their name.
+    """
     activity = _activity_name(log)
     emoji = _ACTIVITY_EMOJI.get(activity, "📝")
     amount = _format_points(log.get("amount", 0))
     unit = log.get("unit_name", "")
     language = _language_name(log)
-    lang_part = f" ({language})" if language else ""
+    name = (log.get("user_display_name") or "Someone").strip()
+    points = _format_points(log.get("score", 0))
+
+    embed = discord.Embed(
+        # e.g. "📖 Reading"; keep the emoji alone if the activity name is missing.
+        title=f"{emoji} {activity}".strip(),
+        color=_ACTIVITY_COLOR.get(activity, discord.Color.blurple()),
+    )
+    # The logger's identity, with their Discord avatar when linked via /claim.
+    embed.set_author(name=name, icon_url=avatar_url)
 
     # A title (the log's description) is optional -- show it quoted when present.
     description = (log.get("description") or "").strip()
-    title_part = f" — 「{description}」" if description else ""
+    if description:
+        embed.description = f"「{description}」"
 
-    name = (log.get("user_display_name") or "Someone").strip()
-    return (
-        f"{emoji} **{name}** logged "
-        f"**{amount} {unit}** · {activity}{lang_part}{title_part} · "
-        f"**+{_format_points(log.get('score', 0))} pts**"
-    )
+    embed.add_field(name="Amount", value=f"{amount} {unit}".strip() or "—", inline=True)
+    if language:
+        embed.add_field(name="Language", value=language, inline=True)
+    embed.add_field(name="Points", value=f"+{points}", inline=True)
+    return embed
 
 
 class LogFeed(commands.Cog):
@@ -149,14 +186,47 @@ class LogFeed(commands.Cog):
             # Keep the most recent ones (the tail of the chronological list).
             to_post = to_post[-MAX_POSTS_PER_POLL:]
 
+        # Claim map for this guild, so a linked logger's card shows their avatar.
+        # ``avatar_cache`` memoises the (possibly fetched) URL per user across a
+        # burst from the same person.
+        claims = config_store.get_guild_claims(guild_id)
+        avatar_cache: dict[int, Optional[str]] = {}
         for log in to_post:
-            await self._post(settings["channel_id"], _format_log(log))
+            name = (log.get("user_display_name") or "Someone").strip()
+            avatar_url = await self._avatar_url_for(claims, name, avatar_cache)
+            await self._post(settings["channel_id"], embed=_format_log_embed(log, avatar_url))
         if overflow > 0:
             await self._post(
-                settings["channel_id"], f"…and {overflow} more log(s) in the last few minutes."
+                settings["channel_id"],
+                content=f"…and {overflow} more log(s) in the last few minutes.",
             )
 
         config_store.set_guild_logfeed(guild_id, last_seen=newest_created_at)
+
+    async def _avatar_url_for(
+        self, claims: dict[str, str], name: str, cache: dict[int, Optional[str]]
+    ) -> Optional[str]:
+        """Return the Discord avatar URL for the logger ``name``, or ``None``.
+
+        ``None`` when the tadoku username isn't linked to a Discord user via
+        ``/claim`` or the user can't be resolved. Results (including misses) are
+        memoised in ``cache`` so a burst from one person costs at most one lookup.
+        """
+        uid = _claimer_id(claims, name)
+        if uid is None:
+            return None
+        if uid in cache:
+            return cache[uid]
+        user = self.bot.get_user(uid)
+        if user is None:
+            try:
+                user = await self.bot.fetch_user(uid)
+            except discord.HTTPException:
+                cache[uid] = None
+                return None
+        url = user.display_avatar.url
+        cache[uid] = url
+        return url
 
     async def _collect_new_logs(self, contest_id: str, cutoff: datetime) -> list[dict]:
         """Return non-deleted logs with ``created_at`` after ``cutoff``, newest-first.
@@ -179,8 +249,14 @@ class LogFeed(commands.Cog):
                 break
         return collected
 
-    async def _post(self, channel_id: int, content: str) -> None:
-        """Send ``content`` to the channel, tolerating a missing/forbidden one."""
+    async def _post(
+        self,
+        channel_id: int,
+        content: Optional[str] = None,
+        embed: Optional[discord.Embed] = None,
+    ) -> None:
+        """Send a message (text and/or embed) to the channel, tolerating a
+        missing/forbidden one."""
         channel = self.bot.get_channel(channel_id)
         if channel is None:
             try:
@@ -189,7 +265,7 @@ class LogFeed(commands.Cog):
                 _log.warning("Log feed: channel %s not found", channel_id)
                 return
         try:
-            await channel.send(content)
+            await channel.send(content, embed=embed)
         except discord.HTTPException:
             _log.warning("Log feed: couldn't post to channel %s", channel_id)
 
