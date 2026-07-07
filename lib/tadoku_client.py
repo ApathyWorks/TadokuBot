@@ -164,3 +164,29 @@ async def list_contest_logs(
         {"page": page, "page_size": page_size},
     )
     return data.get("logs", [])
+
+
+async def list_user_logs(
+    session: aiohttp.ClientSession,
+    user_id: str,
+    *,
+    page: int = 0,
+    page_size: int = 100,
+) -> dict:
+    """Fetch one page of a user's logs across *all* contests, newest first.
+
+    Unlike ``list_contest_logs`` this is not scoped to a contest, so paging
+    through it yields a user's entire immersion history -- what the log feed sums
+    into lifetime characters/pages/listening for a claimed member's card. Each
+    log carries ``amount``, ``unit_name`` and an ``activity``/``language`` object,
+    plus ``deleted`` and ``created_at``.
+
+    Returns the raw envelope ``{"logs": [...], "total_size": N}`` (unlike the
+    contest-scoped helper, callers need ``total_size`` to know when to stop
+    paging).
+    """
+    return await _get(
+        session,
+        f"/users/{user_id}/logs",
+        {"page": page, "page_size": page_size},
+    )

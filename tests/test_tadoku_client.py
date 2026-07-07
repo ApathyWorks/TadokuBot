@@ -142,3 +142,20 @@ async def test_list_contest_logs_defaults_to_empty_list_when_key_missing(tadoku_
         logs = await tadoku.list_contest_logs(session, "abc-123")
 
     assert logs == []
+
+
+async def test_list_user_logs_returns_envelope_and_sends_paging(tadoku_server):
+    tadoku_server.set_response(
+        "/users/user-1/logs",
+        200,
+        {"logs": [{"amount": 12, "unit_name": "Page"}], "total_size": 24},
+    )
+
+    async with aiohttp.ClientSession() as session:
+        data = await tadoku.list_user_logs(session, "user-1", page=1, page_size=100)
+
+    assert data["total_size"] == 24
+    assert data["logs"][0]["unit_name"] == "Page"
+    [(path, query)] = tadoku_server.requests
+    assert path == "/users/user-1/logs"
+    assert query == {"page": "1", "page_size": "100"}

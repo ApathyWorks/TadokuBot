@@ -6,6 +6,12 @@ one — who logged it, what they logged, and the points — to the chosen channe
 an embed "card". If the logger has linked their Discord account via ``/claim``,
 the card carries their Discord avatar.
 
+If the logger has linked their Discord account via ``/claim``, the log posts as a
+richer "profile card": their Discord avatar, their all-time immersion stats
+(characters, pages, listening hours — summed live from tadoku.app's per-user log
+history) on the left, and this log on the right. Everyone else gets the plain log
+card.
+
 The poller keeps a per-guild ``last_seen`` high-water mark (the ``created_at`` of
 the newest log already posted) so it never repeats a log or dumps a backlog: on
 enable the mark is seeded to "now", and each poll posts only logs newer than it.
@@ -42,6 +48,11 @@ LOGFEED_MAX_PAGES = 5
 # "…and N more" trailer, so a burst can't flood the channel.
 MAX_POSTS_PER_POLL = 20
 
+# Safety cap on pages walked when summing a user's whole log history for the
+# lifetime stats. 50 x 100 = 5,000 logs covers any realistic member; it just
+# bounds the pathological case (and the cost, since this runs per claimed logger).
+LIFETIME_MAX_PAGES = 50
+
 # Emoji per activity name, with a neutral fallback.
 _ACTIVITY_EMOJI = {"Reading": "📖", "Listening": "🎧"}
 
@@ -56,6 +67,16 @@ _ACTIVITY_COLOR = {
 def _format_points(score) -> str:
     """Render a score without a pointless trailing ``.0`` (192, 7.2, 3)."""
     return f"{score:.1f}".rstrip("0").rstrip(".")
+
+
+def _format_count(n: float) -> str:
+    """Human-readable count: 6,600,000 -> "6.6M", 12,300 -> "12.3k", 812 -> "812"."""
+    n = int(round(n))
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.1f}M"
+    if n >= 10_000:
+        return f"{n / 1_000:.1f}k"
+    return f"{n:,}"
 
 
 def _activity_name(log: dict) -> str:
@@ -81,21 +102,48 @@ def _claimer_id(claims: dict[str, str], name: str) -> Optional[int]:
     return None
 
 
-def _format_log_embed(log: dict, avatar_url: Optional[str] = None) -> discord.Embed:
-    """Render one log as an embed "card": who, what, and points.
+def _lifetime_value(lifetime: dict) -> str:
+    """The left-column body: a claimed member's all-time totals."""
+    hours = lifetime.get("minutes", 0) / 60
+    return (
+        f"**Characters** {_format_count(lifetime.get('characters', 0))}\n"
+        f"**Pages** {_format_count(lifetime.get('pages', 0))}\n"
+        f"**Listening** {hours:.1f}h"
+    )
 
-    Carries the same information as the old one-line text (logger, activity,
-    amount + unit, language, optional material title, points) laid out as an
-    author line + fields. ``avatar_url`` (the logger's Discord avatar, when they
-    have claimed the username) is shown beside their name.
-    """
-    activity = _activity_name(log)
-    emoji = _ACTIVITY_EMOJI.get(activity, "📝")
+
+def _this_log_value(log: dict) -> str:
+    """The right-column body: what this particular log is."""
     amount = _format_points(log.get("amount", 0))
     unit = log.get("unit_name", "")
     language = _language_name(log)
-    name = (log.get("user_display_name") or "Someone").strip()
     points = _format_points(log.get("score", 0))
+    lines = [f"**{f'{amount} {unit}'.strip()}**"]
+    if language:
+        lines.append(language)
+    lines.append(f"**+{points}** pts")
+    return "\n".join(lines)
+
+
+def _format_log_embed(
+    log: dict, avatar_url: Optional[str] = None, lifetime: Optional[dict] = None
+) -> discord.Embed:
+    """Render one log as an embed "card": who, what, and points.
+
+    Carries the same information as the old one-line text (logger, activity,
+    amount + unit, language, optional material title, points). ``avatar_url``
+    (the logger's Discord avatar, when they've claimed the username) is shown
+    beside their name.
+
+    When ``lifetime`` is given (a claimed member's all-time totals) the card
+    becomes a two-column "profile" layout — their immersion stats on the left,
+    this log on the right — like a proper card. Without it, the log details sit
+    in the usual Amount / Language / Points fields.
+    """
+    activity = _activity_name(log)
+    emoji = _ACTIVITY_EMOJI.get(activity, "📝")
+    language = _language_name(log)
+    name = (log.get("user_display_name") or "Someone").strip()
 
     embed = discord.Embed(
         # e.g. "📖 Reading"; keep the emoji alone if the activity name is missing.
@@ -110,10 +158,18 @@ def _format_log_embed(log: dict, avatar_url: Optional[str] = None) -> discord.Em
     if description:
         embed.description = f"「{description}」"
 
-    embed.add_field(name="Amount", value=f"{amount} {unit}".strip() or "—", inline=True)
-    if language:
-        embed.add_field(name="Language", value=language, inline=True)
-    embed.add_field(name="Points", value=f"+{points}", inline=True)
+    if lifetime is not None:
+        # Two inline fields sit side by side: lifetime stats | this log.
+        embed.add_field(name="📊 Immersion", value=_lifetime_value(lifetime), inline=True)
+        embed.add_field(name=f"{emoji} This log", value=_this_log_value(log), inline=True)
+    else:
+        amount = _format_points(log.get("amount", 0))
+        unit = log.get("unit_name", "")
+        points = _format_points(log.get("score", 0))
+        embed.add_field(name="Amount", value=f"{amount} {unit}".strip() or "—", inline=True)
+        if language:
+            embed.add_field(name="Language", value=language, inline=True)
+        embed.add_field(name="Points", value=f"+{points}", inline=True)
     return embed
 
 
@@ -186,15 +242,15 @@ class LogFeed(commands.Cog):
             # Keep the most recent ones (the tail of the chronological list).
             to_post = to_post[-MAX_POSTS_PER_POLL:]
 
-        # Claim map for this guild, so a linked logger's card shows their avatar.
-        # ``avatar_cache`` memoises the (possibly fetched) URL per user across a
-        # burst from the same person.
+        # Claim map for this guild: a claimed logger gets the rich profile card
+        # (avatar + lifetime stats); everyone else gets the plain log card. The
+        # caches memoise per-user avatar/lifetime lookups across a burst.
         claims = config_store.get_guild_claims(guild_id)
         avatar_cache: dict[int, Optional[str]] = {}
+        lifetime_cache: dict[str, Optional[dict]] = {}
         for log in to_post:
-            name = (log.get("user_display_name") or "Someone").strip()
-            avatar_url = await self._avatar_url_for(claims, name, avatar_cache)
-            await self._post(settings["channel_id"], embed=_format_log_embed(log, avatar_url))
+            embed = await self._build_card(log, claims, avatar_cache, lifetime_cache)
+            await self._post(settings["channel_id"], embed=embed)
         if overflow > 0:
             await self._post(
                 settings["channel_id"],
@@ -203,18 +259,90 @@ class LogFeed(commands.Cog):
 
         config_store.set_guild_logfeed(guild_id, last_seen=newest_created_at)
 
-    async def _avatar_url_for(
-        self, claims: dict[str, str], name: str, cache: dict[int, Optional[str]]
-    ) -> Optional[str]:
-        """Return the Discord avatar URL for the logger ``name``, or ``None``.
+    async def _build_card(
+        self,
+        log: dict,
+        claims: dict[str, str],
+        avatar_cache: dict[int, Optional[str]],
+        lifetime_cache: dict[str, Optional[dict]],
+    ) -> discord.Embed:
+        """Build the embed for one log: a rich profile card if the logger has
+        claimed their username, else the plain log card.
 
-        ``None`` when the tadoku username isn't linked to a Discord user via
-        ``/claim`` or the user can't be resolved. Results (including misses) are
-        memoised in ``cache`` so a burst from one person costs at most one lookup.
+        A claimed logger always gets their avatar; the lifetime stats column is
+        added when the (live) lifetime lookup succeeds -- a tadoku.app hiccup just
+        drops the column, it never blocks the post.
         """
-        uid = _claimer_id(claims, name)
-        if uid is None:
+        name = (log.get("user_display_name") or "Someone").strip()
+        claimer = _claimer_id(claims, name)
+        if claimer is None:
+            return _format_log_embed(log)
+
+        avatar_url = await self._avatar_url_for_id(claimer, avatar_cache)
+        lifetime = await self._lifetime_stats(log.get("user_id"), lifetime_cache)
+        return _format_log_embed(log, avatar_url=avatar_url, lifetime=lifetime)
+
+    async def _lifetime_stats(
+        self, user_id: Optional[str], cache: dict[str, Optional[dict]]
+    ) -> Optional[dict]:
+        """Return a user's all-time ``{characters, pages, minutes}``, or ``None``.
+
+        ``None`` when the id is missing or tadoku.app can't be reached. Results
+        (including misses) are memoised in ``cache`` so a burst from one person
+        costs at most one walk of their history.
+        """
+        if not user_id:
             return None
+        if user_id in cache:
+            return cache[user_id]
+        try:
+            stats = await self._compute_lifetime(user_id)
+        except tadoku.TadokuAPIError:
+            _log.warning("Log feed: lifetime lookup for user %s failed", user_id)
+            stats = None
+        cache[user_id] = stats
+        return stats
+
+    async def _compute_lifetime(self, user_id: str) -> dict:
+        """Sum a user's whole log history into characters / pages / listening minutes.
+
+        Buckets each non-deleted log by its unit: anything with "character" in the
+        unit name counts as characters, "page" as pages (covers "Comic page"), and
+        "minute" as listening minutes ("Minute"/"Dense minute"). Pages the API by
+        ``total_size``, bounded by ``LIFETIME_MAX_PAGES``.
+        """
+        characters = pages = minutes = 0.0
+        for page in range(LIFETIME_MAX_PAGES):
+            data = await tadoku.list_user_logs(
+                self.bot.session, user_id, page=page, page_size=LOG_PAGE_SIZE
+            )
+            logs = data.get("logs", [])
+            for log in logs:
+                if log.get("deleted"):
+                    continue
+                unit = (log.get("unit_name") or "").lower()
+                amount = log.get("amount") or 0
+                if "character" in unit:
+                    characters += amount
+                elif "page" in unit:
+                    pages += amount
+                elif "minute" in unit:
+                    minutes += amount
+            # Stop at a short page or once we've covered the reported total.
+            if len(logs) < LOG_PAGE_SIZE or (page + 1) * LOG_PAGE_SIZE >= data.get("total_size", 0):
+                break
+        return {"characters": characters, "pages": pages, "minutes": minutes}
+
+    async def _avatar_url_for_id(
+        self, uid: int, cache: dict[int, Optional[str]]
+    ) -> Optional[str]:
+        """Return the Discord avatar URL for user ``uid``, or ``None`` if it can't
+        be resolved.
+
+        Tries the cache, then the bot's member cache, then a live ``fetch_user``.
+        Results (including misses) are memoised so a burst from one person costs
+        at most one lookup.
+        """
         if uid in cache:
             return cache[uid]
         user = self.bot.get_user(uid)
