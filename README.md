@@ -64,14 +64,15 @@ minutes** the bot checks tadoku.app for new logs and posts each one — who logg
 logged (activity, amount, title, language), and the points — to the channel as an embed **card**,
 one per log, colour-coded by activity.
 
-If the logger has linked their Discord account with [`/claim`](#discord--tadoku-matching), the card
-becomes a two-column **profile card**: their Discord avatar and **all-time immersion stats**
-(characters, pages, listening hours) on the left, and this log on the right. Those lifetime totals
-are summed live from tadoku.app's full per-user log history (across every contest), so they reflect
-the member's real numbers — no local tally is kept. Unlinked loggers get the plain log card.
+If the logger has linked their Discord account with [`/claim`](#discord--tadoku-matching), the log
+instead posts as a rendered **profile card image**: their Discord avatar, their **all-time immersion
+stats** (characters, pages, listening hours), and the log they just made. Those lifetime totals are
+summed live from tadoku.app's full per-user log history (across every contest), so they reflect the
+member's real numbers — no local tally is kept. Unlinked loggers get the plain embed card.
 
-The bot needs **Embed Links** permission in the channel (in addition to View Channel / Send
-Messages) for the cards to render.
+The card is drawn with Pillow (the Docker image installs `fonts-dejavu-core`; a built-in font is the
+fallback). The bot needs **Embed Links** permission for the plain embed cards and **Attach Files**
+for the rendered profile-card images (in addition to View Channel / Send Messages).
 
 Only logs made *after* you run `/log on` are posted (no backlog dump); a per-server high-water mark
 keeps it from repeating. A burst is capped per poll with an "…and N more" note. `/log off` stops it;

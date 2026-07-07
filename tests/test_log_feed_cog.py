@@ -15,6 +15,7 @@ import pytest
 import cogs.leaderboard as leaderboard  # noqa: F401 -- patched indirectly via tadoku_client
 import cogs.log_feed as log_feed
 import lib.config_store as config_store
+import lib.profile_card as profile_card
 import lib.tadoku_client as tadoku_client
 from tests.conftest import make_interaction
 
@@ -33,6 +34,9 @@ def patched(monkeypatch):
     monkeypatch.setattr(
         tadoku_client, "list_user_logs", AsyncMock(return_value={"logs": [], "total_size": 0})
     )
+    # Stub the (Pillow) image renderer so poll tests don't render real PNGs; the
+    # renderer itself is covered in test_profile_card.py.
+    monkeypatch.setattr(profile_card, "render_card", AsyncMock(return_value=b"PNGDATA"))
 
 
 def _log(created_at, name="ruby", score=10, deleted=False, activity="Reading",
@@ -62,8 +66,9 @@ def _bot_with_channel(channel):
     return bot
 
 
-def _user_with_avatar(url):
-    return SimpleNamespace(display_avatar=SimpleNamespace(url=url))
+def _user_with_avatar(data=b"AVATARBYTES"):
+    """A fake user whose avatar asset reads to ``data`` bytes."""
+    return SimpleNamespace(display_avatar=SimpleNamespace(read=AsyncMock(return_value=data)))
 
 
 def _http_error():
@@ -122,39 +127,11 @@ def test_format_log_embed_has_no_avatar_by_default():
     assert log_feed._format_log_embed(_log(CUTOFF)).author.icon_url is None
 
 
-# ---------------------------------------------------------------------------
-# profile card (two-column, with lifetime stats) + _format_count
-# ---------------------------------------------------------------------------
-
-def test_format_count_is_human_readable():
-    assert log_feed._format_count(6_600_000) == "6.6M"
-    assert log_feed._format_count(12_300) == "12.3k"
-    assert log_feed._format_count(812) == "812"
-    assert log_feed._format_count(0) == "0"
-
-
-def test_format_log_embed_profile_card_has_two_columns():
-    embed = log_feed._format_log_embed(
-        _log(CUTOFF, name="ruby", amount=192, unit="Page", activity="Reading",
-             language="Japanese", score=192),
-        avatar_url="https://cdn/ruby.png",
-        lifetime={"characters": 6_600_000, "pages": 1234, "minutes": 90},
-    )
-    assert embed.author.icon_url == "https://cdn/ruby.png"
-    # Left column: lifetime stats.
-    stats = next(f.value for f in embed.fields if "Immersion" in f.name)
-    assert "6.6M" in stats and "1,234" in stats and "1.5h" in stats  # 90 min -> 1.5h
-    # Right column: this log.
-    this_log = next(f.value for f in embed.fields if "This log" in f.name)
-    assert "192 Page" in this_log and "Japanese" in this_log and "+192" in this_log
-
-
-def test_format_log_embed_stays_plain_without_lifetime():
-    embed = log_feed._format_log_embed(_log(CUTOFF), avatar_url="https://cdn/ruby.png")
-    # Avatar kept, but no lifetime column -> the usual Amount/Points fields.
-    assert embed.author.icon_url == "https://cdn/ruby.png"
-    assert not any("Immersion" in f.name for f in embed.fields)
-    assert "Amount" in {f.name for f in embed.fields}
+def test_this_log_line_has_activity_amount_points_no_language():
+    line = log_feed._this_log_line(_log(CUTOFF, activity="Reading", amount=192, unit="Page",
+                                        language="Japanese", score=192))
+    assert "Reading" in line and "192 Page" in line and "+192 pts" in line
+    assert "Japanese" not in line  # language deliberately dropped from the card
 
 
 # ---------------------------------------------------------------------------
@@ -290,87 +267,142 @@ async def test_poll_pages_past_a_full_page_to_reach_the_marker():
 
 
 # ---------------------------------------------------------------------------
-# avatar on the card for claimed loggers
+# the rendered profile card for claimed loggers
 # ---------------------------------------------------------------------------
 
-async def test_poll_uses_claimed_loggers_avatar():
+def _sent(channel):
+    """The keyword args of the most recent channel.send call."""
+    return channel.send.await_args.kwargs
+
+
+async def test_poll_renders_image_card_for_claimed_logger():
     channel = _channel(cid=555)
     bot = _bot_with_channel(channel)
-    bot.get_user = lambda uid: _user_with_avatar("https://cdn/ruby.png") if uid == 111 else None
+    bot.get_user = lambda uid: _user_with_avatar(b"AV") if uid == 111 else None
     config_store.set_guild_logfeed(999, enabled=True, channel_id=555, last_seen=CUTOFF)
     config_store.set_claim(999, 111, "ruby")  # links "ruby" -> discord user 111
-    tadoku_client.list_contest_logs.side_effect = _pager({0: [_log("2026-07-05T21:00:00Z", name="Ruby ")]})
+    tadoku_client.list_contest_logs.side_effect = _pager({0: [
+        _log("2026-07-05T21:00:00Z", name="Ruby ", user_id="uuid-ruby", amount=192, unit="Page", score=192),
+    ]})
+    tadoku_client.list_user_logs.return_value = {
+        "logs": [{"unit_name": "Character", "amount": 6_600_000, "deleted": False}],
+        "total_size": 1,
+    }
     cog = log_feed.LogFeed(bot)
 
     await cog._poll_guild(999)
 
-    assert channel.send.await_args.kwargs["embed"].author.icon_url == "https://cdn/ruby.png"
+    # Posted as an attached image, not an embed.
+    sent = _sent(channel)
+    assert isinstance(sent["file"], discord.File)
+    assert sent.get("embed") is None
+    # Renderer got the logger's name, avatar bytes, lifetime stats and this-log line.
+    kwargs = profile_card.render_card.await_args.kwargs
+    assert kwargs["display_name"] == "Ruby"
+    assert kwargs["avatar_bytes"] == b"AV"
+    assert kwargs["characters"] == 6_600_000
+    assert "Reading" in kwargs["this_log"] and "192 Page" in kwargs["this_log"]
+    # And it summed the right user's history.
+    assert tadoku_client.list_user_logs.await_args.args[1] == "uuid-ruby"
 
 
-async def test_poll_fetches_user_when_not_cached():
+async def test_poll_card_carries_material_title_as_message_content():
     channel = _channel(cid=555)
     bot = _bot_with_channel(channel)
-    bot.get_user = lambda uid: None
-    bot.fetch_user = AsyncMock(return_value=_user_with_avatar("https://cdn/ruby.png"))
-    config_store.set_guild_logfeed(999, enabled=True, channel_id=555, last_seen=CUTOFF)
-    config_store.set_claim(999, 111, "ruby")
-    tadoku_client.list_contest_logs.side_effect = _pager({0: [_log("2026-07-05T21:00:00Z", name="ruby")]})
-    cog = log_feed.LogFeed(bot)
-
-    await cog._poll_guild(999)
-
-    bot.fetch_user.assert_awaited_once()
-    assert channel.send.await_args.kwargs["embed"].author.icon_url == "https://cdn/ruby.png"
-
-
-async def test_poll_no_avatar_for_unclaimed_logger():
-    channel = _channel(cid=555)
-    bot = _bot_with_channel(channel)  # no get_user needed: unclaimed short-circuits
-    config_store.set_guild_logfeed(999, enabled=True, channel_id=555, last_seen=CUTOFF)
-    tadoku_client.list_contest_logs.side_effect = _pager({0: [_log("2026-07-05T21:00:00Z", name="nobody")]})
-    cog = log_feed.LogFeed(bot)
-
-    await cog._poll_guild(999)
-
-    assert channel.send.await_args.kwargs["embed"].author.icon_url is None
-
-
-async def test_poll_tolerates_avatar_fetch_failure():
-    channel = _channel(cid=555)
-    bot = _bot_with_channel(channel)
-    bot.get_user = lambda uid: None
-    bot.fetch_user = AsyncMock(side_effect=_http_error())
-    config_store.set_guild_logfeed(999, enabled=True, channel_id=555, last_seen=CUTOFF)
-    config_store.set_claim(999, 111, "ruby")
-    tadoku_client.list_contest_logs.side_effect = _pager({0: [_log("2026-07-05T21:00:00Z", name="ruby")]})
-    cog = log_feed.LogFeed(bot)
-
-    await cog._poll_guild(999)  # must not raise
-
-    assert channel.send.await_args.kwargs["embed"].author.icon_url is None
-
-
-async def test_poll_resolves_a_repeat_loggers_avatar_only_once():
-    channel = _channel(cid=555)
-    bot = _bot_with_channel(channel)
-    bot.get_user = lambda uid: None
-    bot.fetch_user = AsyncMock(return_value=_user_with_avatar("https://cdn/ruby.png"))
+    bot.get_user = lambda uid: _user_with_avatar() if uid == 111 else None
     config_store.set_guild_logfeed(999, enabled=True, channel_id=555, last_seen=CUTOFF)
     config_store.set_claim(999, 111, "ruby")
     tadoku_client.list_contest_logs.side_effect = _pager({0: [
-        _log("2026-07-05T21:05:00Z", name="ruby"),
-        _log("2026-07-05T21:00:00Z", name="ruby"),
+        _log("2026-07-05T21:00:00Z", name="ruby", user_id="u", description="奇跡を、生きている"),
+    ]})
+    tadoku_client.list_user_logs.return_value = {"logs": [], "total_size": 0}
+    cog = log_feed.LogFeed(bot)
+
+    await cog._poll_guild(999)
+
+    # content is passed positionally to channel.send(content, embed=, file=).
+    assert channel.send.await_args.args[0] == "「奇跡を、生きている」"
+    assert isinstance(_sent(channel)["file"], discord.File)
+
+
+async def test_poll_plain_embed_for_unclaimed_logger():
+    channel = _channel(cid=555)
+    bot = _bot_with_channel(channel)  # unclaimed short-circuits before any user/lifetime lookup
+    config_store.set_guild_logfeed(999, enabled=True, channel_id=555, last_seen=CUTOFF)
+    tadoku_client.list_contest_logs.side_effect = _pager({0: [
+        _log("2026-07-05T21:00:00Z", name="nobody", user_id="u"),
     ]})
     cog = log_feed.LogFeed(bot)
 
     await cog._poll_guild(999)
 
-    assert channel.send.await_count == 2  # both logs posted
-    bot.fetch_user.assert_awaited_once()  # but the avatar was resolved once (cached)
+    sent = _sent(channel)
+    assert sent.get("file") is None
+    assert sent["embed"].author.icon_url is None
+    profile_card.render_card.assert_not_awaited()
+    tadoku_client.list_user_logs.assert_not_awaited()
+
+
+async def test_poll_falls_back_to_embed_when_lifetime_lookup_fails():
+    channel = _channel(cid=555)
+    bot = _bot_with_channel(channel)
+    bot.get_user = lambda uid: _user_with_avatar() if uid == 111 else None
+    config_store.set_guild_logfeed(999, enabled=True, channel_id=555, last_seen=CUTOFF)
+    config_store.set_claim(999, 111, "ruby")
+    tadoku_client.list_contest_logs.side_effect = _pager({0: [
+        _log("2026-07-05T21:00:00Z", name="ruby", user_id="u"),
+    ]})
+    tadoku_client.list_user_logs.side_effect = tadoku_client.TadokuAPIError("boom")
+    cog = log_feed.LogFeed(bot)
+
+    await cog._poll_guild(999)  # must not raise
+
+    sent = _sent(channel)
+    assert sent.get("file") is None
+    assert sent["embed"] is not None  # plain embed fallback
+    profile_card.render_card.assert_not_awaited()
+
+
+async def test_poll_fetches_avatar_via_fetch_user_and_only_once():
+    channel = _channel(cid=555)
+    bot = _bot_with_channel(channel)
+    bot.get_user = lambda uid: None
+    bot.fetch_user = AsyncMock(return_value=_user_with_avatar(b"AV"))
+    config_store.set_guild_logfeed(999, enabled=True, channel_id=555, last_seen=CUTOFF)
+    config_store.set_claim(999, 111, "ruby")
+    tadoku_client.list_contest_logs.side_effect = _pager({0: [
+        _log("2026-07-05T21:05:00Z", name="ruby", user_id="u"),
+        _log("2026-07-05T21:00:00Z", name="ruby", user_id="u"),
+    ]})
+    cog = log_feed.LogFeed(bot)
+
+    await cog._poll_guild(999)
+
+    assert channel.send.await_count == 2  # both logs posted as cards
+    bot.fetch_user.assert_awaited_once()  # avatar resolved once (cached across the burst)
+
+
+async def test_poll_card_uses_placeholder_when_avatar_read_fails():
+    channel = _channel(cid=555)
+    bot = _bot_with_channel(channel)
+    failing = SimpleNamespace(display_avatar=SimpleNamespace(read=AsyncMock(side_effect=_http_error())))
+    bot.get_user = lambda uid: failing if uid == 111 else None
+    config_store.set_guild_logfeed(999, enabled=True, channel_id=555, last_seen=CUTOFF)
+    config_store.set_claim(999, 111, "ruby")
+    tadoku_client.list_contest_logs.side_effect = _pager({0: [
+        _log("2026-07-05T21:00:00Z", name="ruby", user_id="u"),
+    ]})
+    cog = log_feed.LogFeed(bot)
+
+    await cog._poll_guild(999)  # must not raise
+
+    # Still an image card; the renderer just gets no avatar bytes.
+    assert isinstance(_sent(channel)["file"], discord.File)
+    assert profile_card.render_card.await_args.kwargs["avatar_bytes"] is None
 
 
 # ---------------------------------------------------------------------------
-# lifetime stats (_compute_lifetime) + the profile card in the poll
+# lifetime stats (_compute_lifetime)
 # ---------------------------------------------------------------------------
 
 async def test_compute_lifetime_sums_by_unit_and_skips_deleted():
@@ -410,67 +442,6 @@ async def test_compute_lifetime_pages_until_total_reached():
 
     assert stats["pages"] == log_feed.LOG_PAGE_SIZE + 1
     assert tadoku_client.list_user_logs.await_count == 2
-
-
-async def test_poll_builds_profile_card_for_claimed_logger():
-    channel = _channel(cid=555)
-    bot = _bot_with_channel(channel)
-    bot.get_user = lambda uid: _user_with_avatar("https://cdn/ruby.png") if uid == 111 else None
-    config_store.set_guild_logfeed(999, enabled=True, channel_id=555, last_seen=CUTOFF)
-    config_store.set_claim(999, 111, "ruby")
-    tadoku_client.list_contest_logs.side_effect = _pager({0: [
-        _log("2026-07-05T21:00:00Z", name="ruby", user_id="uuid-ruby", amount=192, unit="Page", score=192),
-    ]})
-    tadoku_client.list_user_logs.return_value = {
-        "logs": [{"unit_name": "Character", "amount": 6_600_000, "deleted": False}],
-        "total_size": 1,
-    }
-    cog = log_feed.LogFeed(bot)
-
-    await cog._poll_guild(999)
-
-    embed = channel.send.await_args.kwargs["embed"]
-    assert embed.author.icon_url == "https://cdn/ruby.png"
-    stats = next(f.value for f in embed.fields if "Immersion" in f.name)
-    assert "6.6M" in stats
-    # Summed the right user's history (log's user_id, positional arg 1).
-    assert tadoku_client.list_user_logs.await_args.args[1] == "uuid-ruby"
-
-
-async def test_poll_plain_card_for_unclaimed_logger_skips_lifetime():
-    channel = _channel(cid=555)
-    bot = _bot_with_channel(channel)
-    config_store.set_guild_logfeed(999, enabled=True, channel_id=555, last_seen=CUTOFF)
-    tadoku_client.list_contest_logs.side_effect = _pager({0: [
-        _log("2026-07-05T21:00:00Z", name="nobody", user_id="uuid-x"),
-    ]})
-    cog = log_feed.LogFeed(bot)
-
-    await cog._poll_guild(999)
-
-    embed = channel.send.await_args.kwargs["embed"]
-    assert embed.author.icon_url is None
-    assert not any("Immersion" in f.name for f in embed.fields)
-    tadoku_client.list_user_logs.assert_not_awaited()
-
-
-async def test_poll_profile_card_drops_stats_when_lifetime_lookup_fails():
-    channel = _channel(cid=555)
-    bot = _bot_with_channel(channel)
-    bot.get_user = lambda uid: _user_with_avatar("https://cdn/ruby.png") if uid == 111 else None
-    config_store.set_guild_logfeed(999, enabled=True, channel_id=555, last_seen=CUTOFF)
-    config_store.set_claim(999, 111, "ruby")
-    tadoku_client.list_contest_logs.side_effect = _pager({0: [
-        _log("2026-07-05T21:00:00Z", name="ruby", user_id="uuid-ruby"),
-    ]})
-    tadoku_client.list_user_logs.side_effect = tadoku_client.TadokuAPIError("boom")
-    cog = log_feed.LogFeed(bot)
-
-    await cog._poll_guild(999)  # must not raise
-
-    embed = channel.send.await_args.kwargs["embed"]
-    assert embed.author.icon_url == "https://cdn/ruby.png"  # avatar still shown
-    assert not any("Immersion" in f.name for f in embed.fields)  # stats column dropped
 
 
 # ---------------------------------------------------------------------------
