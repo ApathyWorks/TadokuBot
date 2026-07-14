@@ -5,7 +5,9 @@ and a ``description`` that is the material's title -- often Japanese, and often
 carrying volume/episode noise like ``"呪術廻戦 Vol. 1"`` or ``"転スラ７３〜８３"``.
 This module maps a log to a poster image, by tag:
 
-  * game / vn   -> VNDB (``api.vndb.org/kana``), no key needed
+  * vn          -> VNDB (``api.vndb.org/kana``), no key needed
+  * game        -> VNDB, then Steam's storefront as a fallback (both keyless);
+                   Steam covers general games (Persona, Ys, …) that aren't VNs
   * anime       -> MyAnimeList API v2 (needs ``MAL_CLIENT_ID``)
   * manga       -> MyAnimeList API v2 (needs ``MAL_CLIENT_ID``)
   * book        -> Google Books (needs ``GOOGLE_BOOKS_API_KEY`` for quota)
@@ -13,7 +15,7 @@ This module maps a log to a poster image, by tag:
 Every lookup is strictly best-effort: a miss, a missing API key, or any
 network/parse failure yields ``None`` so the log feed simply falls back to the
 poster-less card. The title is cleaned of volume/episode markers first, which
-markedly improves the search hit-rate against all three services.
+markedly improves the search hit-rate against every service.
 
 Nothing here authenticates as a user or writes anywhere -- it's read-only
 lookups against public search endpoints, keyed only by the material title.
@@ -24,6 +26,7 @@ import logging
 import os
 import re
 from typing import Optional
+from urllib.parse import quote
 
 import aiohttp
 
@@ -44,7 +47,11 @@ def _category(tags: Optional[list]) -> Optional[str]:
     if not tags:
         return None
     have = {str(t).lower() for t in tags}
-    if have & {"vn", "game"}:
+    # ``vn`` is VNDB-only; ``game`` tries VNDB then Steam. Check ``vn`` first so a
+    # log tagged both keeps the (better) VNDB art without a needless Steam hop.
+    if "vn" in have:
+        return "vn"
+    if "game" in have:
         return "game"
     if "anime" in have:
         return "anime"
@@ -124,8 +131,11 @@ async def _image_url(
     session: aiohttp.ClientSession, category: str, title: str
 ) -> Optional[str]:
     """Dispatch to the right service and return a poster image URL, or ``None``."""
-    if category == "game":
+    if category == "vn":
         return await _vndb_image_url(session, title)
+    if category == "game":
+        # VNs have the nicest art on VNDB; fall back to Steam for everything else.
+        return await _vndb_image_url(session, title) or await _steam_image_url(session, title)
     if category in ("anime", "manga"):
         return await _mal_image_url(session, category, title)
     if category == "book":
@@ -174,6 +184,36 @@ async def _vndb_image_url(
         return None
     image = results[0].get("image") or {}
     return image.get("url")
+
+
+async def _steam_image_url(
+    session: aiohttp.ClientSession, title: str
+) -> Optional[str]:
+    """Look up a game cover on Steam's storefront (no key needed).
+
+    Searches the keyless app-search endpoint (which matches English *and*
+    Japanese titles), then prefers the 2:3 portrait "library" capsule, falling
+    back to the landscape header for the rare title without portrait art. Steam
+    is PC-only, so console-exclusive titles simply won't match (-> ``None``).
+    """
+    search_url = "https://steamcommunity.com/actions/SearchApps/" + quote(title, safe="")
+    async with session.get(search_url, timeout=_TIMEOUT) as resp:
+        if resp.status != 200:
+            return None
+        results = await resp.json()
+    if not results:
+        return None
+    appid = results[0].get("appid")
+    if not appid:
+        return None
+    base = f"https://cdn.cloudflare.steamstatic.com/steam/apps/{appid}"
+    for filename in ("library_600x900.jpg", "header.jpg"):
+        candidate = f"{base}/{filename}"
+        # A cheap HEAD confirms the image exists before we commit to it.
+        async with session.head(candidate, timeout=_TIMEOUT) as resp:
+            if resp.status == 200:
+                return candidate
+    return None
 
 
 async def _google_books_image_url(
