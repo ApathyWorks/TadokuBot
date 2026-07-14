@@ -53,6 +53,9 @@ class _FakeSession:
     def post(self, url, **kwargs):
         return self._next("POST", url, **kwargs)
 
+    def head(self, url, **kwargs):
+        return self._next("HEAD", url, **kwargs)
+
 
 @pytest.fixture(autouse=True)
 def _clear_keys(monkeypatch):
@@ -97,7 +100,8 @@ def test_clean_title_keeps_original_when_cleaning_would_empty_it():
     ([], None),
     (["book"], "book"),
     (["fiction", "game"], "game"),
-    (["vn"], "game"),
+    (["vn"], "vn"),
+    (["vn", "game"], "vn"),  # vn wins so it stays VNDB-only, no Steam hop
     (["anime", "tv"], "anime"),
     (["comic", "manga"], "manga"),
     (["podcast"], None),
@@ -136,13 +140,58 @@ async def test_vndb_game_lookup_parses_image_url_and_downloads():
 
 
 async def test_vndb_returns_none_when_no_results():
+    # ``vn`` is VNDB-only, so an empty result is a clean miss (no Steam fallback).
     session = _FakeSession([_FakeResponse(json_data={"results": []})])
-    assert await poster_client.fetch_poster(session, ["game"], "Nonexistent VN") is None
+    assert await poster_client.fetch_poster(session, ["vn"], "Nonexistent VN") is None
+    assert len(session.calls) == 1  # search only; nothing else attempted
 
 
 async def test_vndb_returns_none_when_image_is_null():
     session = _FakeSession([_FakeResponse(json_data={"results": [{"image": None}]})])
-    assert await poster_client.fetch_poster(session, ["game"], "Coverless VN") is None
+    assert await poster_client.fetch_poster(session, ["vn"], "Coverless VN") is None
+
+
+async def test_game_falls_back_to_steam_when_vndb_misses():
+    session = _FakeSession([
+        _FakeResponse(json_data={"results": []}),                    # VNDB: miss
+        _FakeResponse(json_data=[{"appid": "2161700", "name": "Persona 3 Reload"}]),  # Steam search
+        _FakeResponse(status=200),                                   # HEAD library_600x900 exists
+        _FakeResponse(body=b"STEAMCOVER"),                           # download
+    ])
+    out = await poster_client.fetch_poster(session, ["game"], "Persona 3 Reload")
+    assert out == b"STEAMCOVER"
+    # Order: VNDB POST, Steam search GET, HEAD portrait, GET download.
+    assert [c[0] for c in session.calls] == ["POST", "GET", "HEAD", "GET"]
+    assert "steamcommunity.com/actions/SearchApps" in session.calls[1][1]
+    assert session.calls[2][1].endswith("/2161700/library_600x900.jpg")
+
+
+async def test_steam_falls_back_to_header_when_no_portrait():
+    session = _FakeSession([
+        _FakeResponse(json_data={"results": []}),                    # VNDB miss
+        _FakeResponse(json_data=[{"appid": "42", "name": "Old Game"}]),  # Steam search
+        _FakeResponse(status=404),                                   # no portrait capsule
+        _FakeResponse(status=200),                                   # header.jpg exists
+        _FakeResponse(body=b"HEADER"),                               # download
+    ])
+    out = await poster_client.fetch_poster(session, ["game"], "Old Game")
+    assert out == b"HEADER"
+    assert session.calls[3][1].endswith("/42/header.jpg")
+
+
+async def test_steam_returns_none_when_no_app_matches():
+    session = _FakeSession([
+        _FakeResponse(json_data={"results": []}),  # VNDB miss
+        _FakeResponse(json_data=[]),               # Steam: no match either
+    ])
+    assert await poster_client.fetch_poster(session, ["game"], "Console Exclusive") is None
+
+
+async def test_vn_tag_never_falls_back_to_steam():
+    # A ``vn`` miss must not spill over to Steam (would IndexError on empty queue).
+    session = _FakeSession([_FakeResponse(json_data={"results": []})])
+    assert await poster_client.fetch_poster(session, ["vn"], "Obscure VN") is None
+    assert len(session.calls) == 1
 
 
 async def test_mal_anime_requires_client_id(monkeypatch):
@@ -198,8 +247,9 @@ async def test_google_books_parses_thumbnail_and_upgrades_to_https(monkeypatch):
 
 
 async def test_non_200_search_yields_none(monkeypatch):
+    # ``vn`` -> VNDB only, so a 500 is a clean miss with no Steam fallback attempt.
     session = _FakeSession([_FakeResponse(status=500, json_data={})])
-    assert await poster_client.fetch_poster(session, ["game"], "Whatever") is None
+    assert await poster_client.fetch_poster(session, ["vn"], "Whatever") is None
 
 
 async def test_non_200_download_yields_none():
