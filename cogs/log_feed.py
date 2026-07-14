@@ -29,6 +29,7 @@ from discord.ext import commands, tasks
 
 import cogs.leaderboard as leaderboard
 import lib.config_store as config_store
+import lib.poster_client as poster_client
 import lib.profile_card as profile_card
 import lib.tadoku_client as tadoku
 from lib.permissions import is_admin
@@ -220,8 +221,11 @@ class LogFeed(commands.Cog):
         claims = config_store.get_guild_claims(guild_id)
         avatar_cache: dict[int, Optional[bytes]] = {}
         lifetime_cache: dict[str, Optional[dict]] = {}
+        poster_cache: dict[tuple, Optional[bytes]] = {}
         for log in to_post:
-            message = await self._message_for(log, claims, avatar_cache, lifetime_cache)
+            message = await self._message_for(
+                log, claims, avatar_cache, lifetime_cache, poster_cache
+            )
             await self._post(settings["channel_id"], **message)
         if overflow > 0:
             await self._post(
@@ -237,13 +241,15 @@ class LogFeed(commands.Cog):
         claims: dict[str, str],
         avatar_cache: dict[int, Optional[bytes]],
         lifetime_cache: dict[str, Optional[dict]],
+        poster_cache: dict[tuple, Optional[bytes]],
     ) -> dict:
         """Build the ``send`` kwargs for one log.
 
         A claimed logger whose lifetime stats we can fetch gets the rendered image
-        profile card (``file=``) -- the material title is drawn on the card itself.
-        Everyone else -- and a claimed logger whose lifetime lookup fails -- gets
-        the plain embed card.
+        profile card (``file=``) -- the material title is drawn on the card itself,
+        and when the log is tagged with a media type we recognise (anime/manga/
+        game/book) its cover is drawn on the right. Everyone else -- and a claimed
+        logger whose lifetime lookup fails -- gets the plain embed card.
         """
         name = (log.get("user_display_name") or "Someone").strip()
         claimer = _claimer_id(claims, name)
@@ -251,6 +257,7 @@ class LogFeed(commands.Cog):
             lifetime = await self._lifetime_stats(log.get("user_id"), lifetime_cache)
             if lifetime is not None:
                 avatar_bytes = await self._avatar_bytes_for_id(claimer, avatar_cache)
+                poster_bytes = await self._poster_bytes_for(log, poster_cache)
                 png = await profile_card.render_card(
                     display_name=name,
                     subtitle="Immersion since 2026",
@@ -261,10 +268,29 @@ class LogFeed(commands.Cog):
                     this_log=_this_log_line(log),
                     # The material title now lives on the card (in the log callout).
                     title=(log.get("description") or "").strip(),
+                    # A cover for the tagged material, drawn on the right (or None).
+                    poster_bytes=poster_bytes,
                 )
                 return {"file": discord.File(io.BytesIO(png), filename="log.png")}
 
         return {"embed": _format_log_embed(log)}
+
+    async def _poster_bytes_for(
+        self, log: dict, cache: dict[tuple, Optional[bytes]]
+    ) -> Optional[bytes]:
+        """Return a cover image for the log's material, or ``None``.
+
+        Delegates to ``poster_client`` (which routes on the log's tags to MAL /
+        VNDB / Google Books); any failure yields ``None`` so a missing cover never
+        breaks the card. Results are memoised across a burst via ``cache``.
+        """
+        try:
+            return await poster_client.fetch_poster(
+                self.bot.session, log.get("tags"), log.get("description") or "", cache
+            )
+        except Exception:  # noqa: BLE001 -- a poster is optional; never fail the card
+            _log.warning("Log feed: poster lookup failed for %r", log.get("description"))
+            return None
 
     async def _lifetime_stats(
         self, user_id: Optional[str], cache: dict[str, Optional[dict]]

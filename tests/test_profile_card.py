@@ -78,6 +78,30 @@ async def test_render_card_truncates_an_overlong_title():
     assert _valid_png(data).size == (profile_card.WIDTH, profile_card.HEIGHT)
 
 
+async def test_render_card_with_poster_widens_the_card():
+    # A decodable poster adds the right-hand column, widening the card.
+    buf = io.BytesIO()
+    Image.new("RGB", (300, 450), (200, 60, 60)).save(buf, format="PNG")
+    data = await profile_card.render_card(
+        display_name="Arabra",
+        this_log="Reading  ·  51894 Character  ·  +129 pts",
+        title="Summer Pockets",
+        poster_bytes=buf.getvalue(),
+    )
+    img = _valid_png(data)
+    assert img.size == (profile_card.WIDTH + profile_card.POSTER_PANEL, profile_card.HEIGHT)
+
+
+async def test_render_card_ignores_undecodable_poster_bytes():
+    # Garbage poster bytes -> no poster column, so the card keeps its base size.
+    data = await profile_card.render_card(
+        display_name="Arabra",
+        this_log="Reading  ·  1 Page  ·  +1 pts",
+        poster_bytes=b"not-an-image",
+    )
+    assert _valid_png(data).size == (profile_card.WIDTH, profile_card.HEIGHT)
+
+
 def test_truncate_shortens_text_that_is_too_wide():
     from PIL import Image, ImageDraw
 
