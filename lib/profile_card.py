@@ -25,17 +25,22 @@ from PIL import Image, ImageDraw, ImageFont
 # Everything is authored in logical pixels and multiplied by SCALE when drawn,
 # then the canvas is downsampled back to logical size for crisp antialiasing.
 SCALE = 2
-WIDTH = 960
-HEIGHT = 388
+WIDTH = 1040
+HEIGHT = 430
+
+# Outer margin used to align everything: the avatar's left edge, the content's
+# right edge, and the top/bottom breathing room all key off it.
+MARGIN = 40
 
 # When a material poster is supplied it's drawn in a column to the right of the
-# content, widening the card by ``POSTER_PANEL``. The existing left-hand layout
-# (avatar, name, stats, callout) keeps its coordinates -- only the canvas grows.
-POSTER_MARGIN = 24   # breathing room above/below/right of the poster
-POSTER_GAP = 28      # gap between the content's right edge and the poster
+# content, widening the card by ``POSTER_PANEL`` (which subtracts the content's
+# own right margin, so the gap before the poster and the margin after it stay
+# even). The left-hand layout keeps its coordinates -- only the canvas grows.
+POSTER_MARGIN = 28   # breathing room above/below/right of the poster
+POSTER_GAP = 32      # gap between the content's right edge and the poster
 POSTER_H = HEIGHT - 2 * POSTER_MARGIN          # poster fills the card height
 POSTER_W = round(POSTER_H * 2 / 3)             # portrait cover, 2:3 aspect
-POSTER_PANEL = POSTER_GAP + POSTER_W + POSTER_MARGIN
+POSTER_PANEL = POSTER_GAP + POSTER_W + POSTER_MARGIN - MARGIN
 
 # Palette: a dark charcoal ground with near-white ink and a purple accent, so the
 # card reads comfortably (and doesn't glare) in a Discord channel.
@@ -167,9 +172,9 @@ def _poster_image(poster_bytes: bytes, w: int, h: int, radius: int) -> Optional[
 def _draw_stat(draw: ImageDraw.ImageDraw, box, label: str, value: str) -> None:
     """Draw one stat panel (rounded card with a small label over a big value)."""
     x0, y0, x1, y1 = box
-    draw.rounded_rectangle(box, radius=12 * SCALE, fill=PANEL_BG, outline=HAIRLINE, width=SCALE)
-    draw.text((x0 + 16 * SCALE, y0 + 12 * SCALE), label.upper(), font=_font(13 * SCALE, bold=True), fill=INK_SOFT)
-    draw.text((x0 + 16 * SCALE, y0 + 34 * SCALE), value, font=_font(28 * SCALE, bold=True), fill=INK)
+    draw.rounded_rectangle(box, radius=14 * SCALE, fill=PANEL_BG, outline=HAIRLINE, width=SCALE)
+    draw.text((x0 + 20 * SCALE, y0 + 22 * SCALE), label.upper(), font=_font(14 * SCALE, bold=True), fill=INK_SOFT)
+    draw.text((x0 + 20 * SCALE, y0 + 48 * SCALE), value, font=_font(32 * SCALE, bold=True), fill=INK)
 
 
 def _render(
@@ -188,7 +193,7 @@ def _render(
     # A decodable poster widens the card by a right-hand column; anything else
     # (no bytes, or undecodable bytes) renders the original content-only card.
     poster = (
-        _poster_image(poster_bytes, POSTER_W * S, POSTER_H * S, 12 * S)
+        _poster_image(poster_bytes, POSTER_W * S, POSTER_H * S, 14 * S)
         if poster_bytes
         else None
     )
@@ -196,27 +201,32 @@ def _render(
     img = Image.new("RGBA", (card_w * S, HEIGHT * S), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
 
-    # Rounded cream ground with a hairline border; corners left transparent.
+    # Rounded dark ground with a hairline border; corners left transparent.
     draw.rounded_rectangle(
-        (0, 0, card_w * S - 1, HEIGHT * S - 1), radius=24 * S, fill=BG, outline=HAIRLINE, width=S
+        (0, 0, card_w * S - 1, HEIGHT * S - 1), radius=28 * S, fill=BG, outline=HAIRLINE, width=S
     )
     # Purple accent stripe down the left edge.
     draw.rounded_rectangle((0, 0, 10 * S, HEIGHT * S - 1), radius=10 * S, fill=ACCENT)
     draw.rectangle((6 * S, 0, 12 * S, HEIGHT * S - 1), fill=ACCENT)
 
-    # Avatar.
-    av_size = 200 * S
+    # Avatar, vertically centred on the card.
+    av_size = 210 * S
     avatar = _circular_avatar(avatar_bytes, av_size)
-    av_x, av_y = 40 * S, 80 * S
+    av_x = MARGIN * S
+    av_y = (HEIGHT * S - av_size) // 2
     img.paste(avatar, (av_x, av_y), avatar)
     # Hairline ring around it.
     draw.ellipse((av_x, av_y, av_x + av_size, av_y + av_size), outline=HAIRLINE, width=S)
 
+    # Content column: right of the avatar, ending at the right margin. Its stack
+    # (name, subtitle, stats, callout) is vertically centred to match the avatar.
+    content_x = av_x + av_size + MARGIN * S
+    right = (WIDTH - MARGIN) * S
+
     # Header: name + subtitle.
-    content_x = av_x + av_size + 36 * S
-    draw.text((content_x, 74 * S), display_name, font=_font(40 * S, bold=True), fill=INK)
+    draw.text((content_x, 44 * S), display_name, font=_font(46 * S, bold=True), fill=INK)
     if subtitle:
-        draw.text((content_x, 126 * S), subtitle, font=_font(20 * S), fill=INK_SOFT)
+        draw.text((content_x, 104 * S), subtitle, font=_font(22 * S), fill=INK_SOFT)
 
     # Stat row: Characters | Pages | Listening.
     stats = [
@@ -224,10 +234,9 @@ def _render(
         ("Pages", _format_count(pages)),
         ("Listening", f"{listening_hours:.1f}h"),
     ]
-    row_y = 176 * S
-    panel_h = 96 * S
-    gap = 16 * S
-    right = WIDTH * S - 40 * S
+    row_y = 160 * S
+    panel_h = 108 * S
+    gap = 18 * S
     panel_w = (right - content_x - 2 * gap) // 3
     for i, (label, value) in enumerate(stats):
         x0 = content_x + i * (panel_w + gap)
@@ -236,34 +245,34 @@ def _render(
     # "This log" callout with its own accent stripe. When there's a material
     # title it sits on top (quoted) with the log line beneath; otherwise the log
     # line is centred on its own.
-    call_y0 = row_y + panel_h + 16 * S
-    call_h = 84 * S
+    call_y0 = row_y + panel_h + 18 * S
+    call_h = 100 * S
     call_box = (content_x, call_y0, right, call_y0 + call_h)
-    draw.rounded_rectangle(call_box, radius=10 * S, fill=CALLOUT_BG, outline=HAIRLINE, width=S)
+    draw.rounded_rectangle(call_box, radius=12 * S, fill=CALLOUT_BG, outline=HAIRLINE, width=S)
     draw.rounded_rectangle((content_x, call_y0, content_x + 6 * S, call_y0 + call_h), radius=3 * S, fill=ACCENT)
 
-    text_x = content_x + 20 * S
-    text_w = right - text_x - 16 * S
+    text_x = content_x + 22 * S
+    text_w = right - text_x - 18 * S
     if title:
-        title_font = _font(26 * S)
-        log_font = _font(22 * S, bold=True)
-        draw.text((text_x, call_y0 + 12 * S), _truncate(draw, f"「{title}」", title_font, text_w),
+        title_font = _font(30 * S)
+        log_font = _font(24 * S, bold=True)
+        draw.text((text_x, call_y0 + 18 * S), _truncate(draw, f"「{title}」", title_font, text_w),
                   font=title_font, fill=INK)
-        draw.text((text_x, call_y0 + 50 * S), _truncate(draw, this_log, log_font, text_w),
+        draw.text((text_x, call_y0 + 58 * S), _truncate(draw, this_log, log_font, text_w),
                   font=log_font, fill=INK_SOFT)
     else:
-        log_font = _font(24 * S, bold=True)
-        draw.text((text_x, call_y0 + 28 * S), _truncate(draw, this_log, log_font, text_w),
+        log_font = _font(28 * S, bold=True)
+        draw.text((text_x, call_y0 + 36 * S), _truncate(draw, this_log, log_font, text_w),
                   font=log_font, fill=INK)
 
     # Material poster in the right-hand column, with a hairline frame.
     if poster is not None:
-        px0 = (WIDTH - 40 + POSTER_GAP) * S
+        px0 = (WIDTH - MARGIN + POSTER_GAP) * S
         py0 = POSTER_MARGIN * S
         img.paste(poster, (px0, py0), poster)
         draw.rounded_rectangle(
             (px0, py0, px0 + POSTER_W * S - 1, py0 + POSTER_H * S - 1),
-            radius=12 * S, outline=HAIRLINE, width=S,
+            radius=14 * S, outline=HAIRLINE, width=S,
         )
 
     # Downsample for antialiasing, flatten onto transparency-friendly RGBA PNG.
