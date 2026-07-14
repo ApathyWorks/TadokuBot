@@ -3,8 +3,11 @@
 Styled after VN_Club_Bot's profile card: a light cream panel with a purple
 accent stripe, a circular avatar, the member's lifetime immersion stats
 (characters / pages / listening hours) in a stat row, and a callout for the log
-they just made. It is a pure renderer -- the log-feed cog fetches the numbers and
-the avatar bytes and passes them in, so nothing here touches the network.
+they just made. When the cog supplies a material cover (``poster_bytes``) it is
+drawn in a column on the right and the card widens to fit; without one the card
+keeps its base size. It is a pure renderer -- the log-feed cog fetches the
+numbers, the avatar bytes and the poster and passes them in, so nothing here
+touches the network.
 
 The card is drawn at 2x and downsampled for antialiasing, and the (CPU-bound)
 render runs in a thread via ``render_card`` so it never blocks the event loop.
@@ -24,6 +27,15 @@ from PIL import Image, ImageDraw, ImageFont
 SCALE = 2
 WIDTH = 960
 HEIGHT = 388
+
+# When a material poster is supplied it's drawn in a column to the right of the
+# content, widening the card by ``POSTER_PANEL``. The existing left-hand layout
+# (avatar, name, stats, callout) keeps its coordinates -- only the canvas grows.
+POSTER_MARGIN = 24   # breathing room above/below/right of the poster
+POSTER_GAP = 28      # gap between the content's right edge and the poster
+POSTER_H = HEIGHT - 2 * POSTER_MARGIN          # poster fills the card height
+POSTER_W = round(POSTER_H * 2 / 3)             # portrait cover, 2:3 aspect
+POSTER_PANEL = POSTER_GAP + POSTER_W + POSTER_MARGIN
 
 # Palette: a dark charcoal ground with near-white ink and a purple accent, so the
 # card reads comfortably (and doesn't glare) in a Discord channel.
@@ -119,6 +131,39 @@ def _circular_avatar(avatar_bytes: Optional[bytes], size: int) -> Image.Image:
     return out
 
 
+def _poster_image(poster_bytes: bytes, w: int, h: int, radius: int) -> Optional[Image.Image]:
+    """Return a ``w``x``h`` RGBA poster (cover-cropped, rounded), or ``None``.
+
+    ``None`` when the bytes can't be decoded, so the caller draws the card
+    without a poster rather than failing. ``w``/``h``/``radius`` are in scaled
+    (drawing) pixels.
+    """
+    try:
+        source = Image.open(io.BytesIO(poster_bytes)).convert("RGB")
+    except Exception:  # noqa: BLE001 -- any decode failure -> no poster
+        return None
+
+    # Cover-crop: scale so the image fills the box, then centre-crop the overflow.
+    sw, sh = source.size
+    scale = max(w / sw, h / sh)
+    nw, nh = max(1, round(sw * scale)), max(1, round(sh * scale))
+    source = source.resize((nw, nh), Image.LANCZOS)
+    left, top = (nw - w) // 2, (nh - h) // 2
+    source = source.crop((left, top, left + w, top + h))
+
+    # Rounded-corner mask (oversampled for a smooth edge).
+    over = 4
+    mask = Image.new("L", (w * over, h * over), 0)
+    ImageDraw.Draw(mask).rounded_rectangle(
+        (0, 0, w * over - 1, h * over - 1), radius=radius * over, fill=255
+    )
+    mask = mask.resize((w, h), Image.LANCZOS)
+
+    out = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    out.paste(source, (0, 0), mask)
+    return out
+
+
 def _draw_stat(draw: ImageDraw.ImageDraw, box, label: str, value: str) -> None:
     """Draw one stat panel (rounded card with a small label over a big value)."""
     x0, y0, x1, y1 = box
@@ -136,15 +181,24 @@ def _render(
     listening_hours: float,
     this_log: str,
     title: str,
+    poster_bytes: Optional[bytes],
 ) -> bytes:
     """Compose the card and return PNG bytes (runs on a worker thread)."""
     S = SCALE
-    img = Image.new("RGBA", (WIDTH * S, HEIGHT * S), (0, 0, 0, 0))
+    # A decodable poster widens the card by a right-hand column; anything else
+    # (no bytes, or undecodable bytes) renders the original content-only card.
+    poster = (
+        _poster_image(poster_bytes, POSTER_W * S, POSTER_H * S, 12 * S)
+        if poster_bytes
+        else None
+    )
+    card_w = WIDTH + (POSTER_PANEL if poster is not None else 0)
+    img = Image.new("RGBA", (card_w * S, HEIGHT * S), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
 
     # Rounded cream ground with a hairline border; corners left transparent.
     draw.rounded_rectangle(
-        (0, 0, WIDTH * S - 1, HEIGHT * S - 1), radius=24 * S, fill=BG, outline=HAIRLINE, width=S
+        (0, 0, card_w * S - 1, HEIGHT * S - 1), radius=24 * S, fill=BG, outline=HAIRLINE, width=S
     )
     # Purple accent stripe down the left edge.
     draw.rounded_rectangle((0, 0, 10 * S, HEIGHT * S - 1), radius=10 * S, fill=ACCENT)
@@ -202,8 +256,18 @@ def _render(
         draw.text((text_x, call_y0 + 28 * S), _truncate(draw, this_log, log_font, text_w),
                   font=log_font, fill=INK)
 
+    # Material poster in the right-hand column, with a hairline frame.
+    if poster is not None:
+        px0 = (WIDTH - 40 + POSTER_GAP) * S
+        py0 = POSTER_MARGIN * S
+        img.paste(poster, (px0, py0), poster)
+        draw.rounded_rectangle(
+            (px0, py0, px0 + POSTER_W * S - 1, py0 + POSTER_H * S - 1),
+            radius=12 * S, outline=HAIRLINE, width=S,
+        )
+
     # Downsample for antialiasing, flatten onto transparency-friendly RGBA PNG.
-    img = img.resize((WIDTH, HEIGHT), Image.LANCZOS)
+    img = img.resize((card_w, HEIGHT), Image.LANCZOS)
     buffer = io.BytesIO()
     img.save(buffer, format="PNG")
     return buffer.getvalue()
@@ -219,9 +283,15 @@ async def render_card(
     listening_hours: float = 0,
     this_log: str = "",
     title: str = "",
+    poster_bytes: Optional[bytes] = None,
 ) -> bytes:
-    """Render the profile card off the event loop; returns PNG bytes."""
+    """Render the profile card off the event loop; returns PNG bytes.
+
+    When ``poster_bytes`` is supplied (and decodable) the material's cover is
+    drawn in a column on the right and the card widens accordingly; otherwise the
+    original content-only card is returned unchanged.
+    """
     return await asyncio.to_thread(
         _render, display_name, subtitle, avatar_bytes, characters, pages, listening_hours,
-        this_log, title,
+        this_log, title, poster_bytes,
     )

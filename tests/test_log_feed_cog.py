@@ -327,6 +327,51 @@ async def test_poll_card_draws_the_material_title_on_the_card():
     assert isinstance(_sent(channel)["file"], discord.File)
 
 
+async def test_poll_card_fetches_and_passes_poster_for_tagged_log(monkeypatch):
+    channel = _channel(cid=555)
+    bot = _bot_with_channel(channel)
+    bot.get_user = lambda uid: _user_with_avatar() if uid == 111 else None
+    config_store.set_guild_logfeed(999, enabled=True, channel_id=555, last_seen=CUTOFF)
+    config_store.set_claim(999, 111, "ruby")
+    log = _log("2026-07-05T21:00:00Z", name="ruby", user_id="u", description="Summer Pockets")
+    log["tags"] = ["fiction", "game"]
+    tadoku_client.list_contest_logs.side_effect = _pager({0: [log]})
+    tadoku_client.list_user_logs.return_value = {"logs": [], "total_size": 0}
+    fetch = AsyncMock(return_value=b"POSTERBYTES")
+    monkeypatch.setattr(log_feed.poster_client, "fetch_poster", fetch)
+    cog = log_feed.LogFeed(bot)
+
+    await cog._poll_guild(999)
+
+    # The poster lookup got the log's tags + description, and the bytes reached the card.
+    fetch.assert_awaited_once()
+    assert fetch.await_args.args[1] == ["fiction", "game"]
+    assert fetch.await_args.args[2] == "Summer Pockets"
+    assert profile_card.render_card.await_args.kwargs["poster_bytes"] == b"POSTERBYTES"
+
+
+async def test_poll_card_tolerates_poster_lookup_failure(monkeypatch):
+    channel = _channel(cid=555)
+    bot = _bot_with_channel(channel)
+    bot.get_user = lambda uid: _user_with_avatar() if uid == 111 else None
+    config_store.set_guild_logfeed(999, enabled=True, channel_id=555, last_seen=CUTOFF)
+    config_store.set_claim(999, 111, "ruby")
+    log = _log("2026-07-05T21:00:00Z", name="ruby", user_id="u", description="X")
+    log["tags"] = ["anime"]
+    tadoku_client.list_contest_logs.side_effect = _pager({0: [log]})
+    tadoku_client.list_user_logs.return_value = {"logs": [], "total_size": 0}
+    monkeypatch.setattr(
+        log_feed.poster_client, "fetch_poster", AsyncMock(side_effect=RuntimeError("boom"))
+    )
+    cog = log_feed.LogFeed(bot)
+
+    await cog._poll_guild(999)  # must not raise
+
+    # Still an image card; the renderer just gets no poster.
+    assert isinstance(_sent(channel)["file"], discord.File)
+    assert profile_card.render_card.await_args.kwargs["poster_bytes"] is None
+
+
 async def test_poll_plain_embed_for_unclaimed_logger():
     channel = _channel(cid=555)
     bot = _bot_with_channel(channel)  # unclaimed short-circuits before any user/lifetime lookup
