@@ -191,15 +191,15 @@ def _render(
     text_x = content_x + 20 * S
     text_w = right - text_x - 16 * S
     if title:
-        title_font = _font(22 * S)
-        log_font = _font(18 * S, bold=True)
-        draw.text((text_x, call_y0 + 14 * S), _truncate(draw, f"「{title}」", title_font, text_w),
+        title_font = _font(26 * S)
+        log_font = _font(22 * S, bold=True)
+        draw.text((text_x, call_y0 + 12 * S), _truncate(draw, f"「{title}」", title_font, text_w),
                   font=title_font, fill=INK)
         draw.text((text_x, call_y0 + 50 * S), _truncate(draw, this_log, log_font, text_w),
                   font=log_font, fill=INK_SOFT)
     else:
-        log_font = _font(20 * S, bold=True)
-        draw.text((text_x, call_y0 + 30 * S), _truncate(draw, this_log, log_font, text_w),
+        log_font = _font(24 * S, bold=True)
+        draw.text((text_x, call_y0 + 28 * S), _truncate(draw, this_log, log_font, text_w),
                   font=log_font, fill=INK)
 
     # Downsample for antialiasing, flatten onto transparency-friendly RGBA PNG.
