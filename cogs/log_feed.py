@@ -12,9 +12,9 @@ their immersion stats since the start of 2026 (characters, pages, listening hour
 — summed live from tadoku.app's per-user log history), and this log. Everyone
 else gets the plain embed card.
 
-A ``youtube``-tagged log whose description contains a URL also gets that link
-posted as a follow-up message beneath the card, so Discord renders a playable
-preview.
+A ``youtube``-tagged log whose description contains URL(s) also gets them posted
+as a follow-up message beneath the card, so Discord renders a playable preview
+for each.
 
 The poller keeps a per-guild ``last_seen`` high-water mark (the ``created_at`` of
 the newest log already posted) so it never repeats a log or dumps a backlog: on
@@ -108,19 +108,18 @@ def _claimer_id(claims: dict[str, str], name: str) -> Optional[int]:
 _URL_RE = re.compile(r"https?://\S+")
 
 
-def _youtube_url(log: dict) -> Optional[str]:
-    """The URL in a YouTube-tagged log's description, or ``None``.
+def _youtube_urls(log: dict) -> list[str]:
+    """Every URL in a YouTube-tagged log's description (in order), or ``[]``.
 
-    Only fires when the log carries a ``youtube`` tag and its description holds a
-    URL, so the feed can post that link under the card (Discord renders a
-    playable preview). Any trailing punctuation Discord would choke on is left
-    as-is -- log URLs are pasted, not prose.
+    Only fires when the log carries a ``youtube`` tag, so the feed can post the
+    link(s) under the card (Discord renders a playable preview for each). Any
+    trailing punctuation Discord would choke on is left as-is -- log URLs are
+    pasted, not prose.
     """
     tags = {str(t).lower() for t in (log.get("tags") or [])}
     if "youtube" not in tags:
-        return None
-    match = _URL_RE.search(log.get("description") or "")
-    return match.group(0) if match else None
+        return []
+    return _URL_RE.findall(log.get("description") or "")
 
 
 def _this_log_line(log: dict) -> str:
@@ -251,11 +250,11 @@ class LogFeed(commands.Cog):
                 log, claims, avatar_cache, lifetime_cache, poster_cache
             )
             await self._post(settings["channel_id"], **message)
-            # For a YouTube log, drop the video link under the card as its own
-            # message so Discord renders a playable preview beneath it.
-            url = _youtube_url(log)
-            if url:
-                await self._post(settings["channel_id"], content=url)
+            # For a YouTube log, drop the video link(s) under the card in one
+            # follow-up message so Discord renders a playable preview for each.
+            urls = _youtube_urls(log)
+            if urls:
+                await self._post(settings["channel_id"], content="\n".join(urls))
         if overflow > 0:
             await self._post(
                 settings["channel_id"],

@@ -135,25 +135,31 @@ def test_this_log_line_has_activity_amount_points_no_language():
 
 
 # ---------------------------------------------------------------------------
-# _youtube_url
+# _youtube_urls
 # ---------------------------------------------------------------------------
 
-def test_youtube_url_extracts_link_from_description():
+def test_youtube_urls_extracts_single_link():
     log = _log(CUTOFF, tags=["youtube"], description="面白い動画 https://youtu.be/abc123")
-    assert log_feed._youtube_url(log) == "https://youtu.be/abc123"
+    assert log_feed._youtube_urls(log) == ["https://youtu.be/abc123"]
 
 
-def test_youtube_url_none_without_the_youtube_tag():
+def test_youtube_urls_extracts_all_links_in_order():
+    log = _log(CUTOFF, tags=["youtube"],
+               description="part 1 https://youtu.be/one and https://youtu.be/two")
+    assert log_feed._youtube_urls(log) == ["https://youtu.be/one", "https://youtu.be/two"]
+
+
+def test_youtube_urls_empty_without_the_youtube_tag():
     # A URL in the description but no youtube tag -> we don't post the link.
-    assert log_feed._youtube_url(_log(CUTOFF, tags=["video"], description="https://youtu.be/x")) is None
+    assert log_feed._youtube_urls(_log(CUTOFF, tags=["video"], description="https://youtu.be/x")) == []
 
 
-def test_youtube_url_none_when_description_has_no_url():
-    assert log_feed._youtube_url(_log(CUTOFF, tags=["youtube"], description="just a title")) is None
+def test_youtube_urls_empty_when_description_has_no_url():
+    assert log_feed._youtube_urls(_log(CUTOFF, tags=["youtube"], description="just a title")) == []
 
 
-def test_youtube_url_none_without_tags():
-    assert log_feed._youtube_url(_log(CUTOFF, description="https://youtu.be/x")) is None
+def test_youtube_urls_empty_without_tags():
+    assert log_feed._youtube_urls(_log(CUTOFF, description="https://youtu.be/x")) == []
 
 
 # ---------------------------------------------------------------------------
@@ -428,6 +434,23 @@ async def test_poll_posts_youtube_url_under_the_card():
     assert channel.send.await_count == 2
     assert channel.send.await_args_list[0].kwargs.get("embed") is not None  # the card
     assert channel.send.await_args_list[1].args[0] == "https://youtu.be/xyz"  # the URL
+
+
+async def test_poll_posts_all_youtube_urls_in_one_follow_up():
+    channel = _channel(cid=555)
+    bot = _bot_with_channel(channel)
+    config_store.set_guild_logfeed(999, enabled=True, channel_id=555, last_seen=CUTOFF)
+    tadoku_client.list_contest_logs.side_effect = _pager({0: [
+        _log("2026-07-05T21:00:00Z", name="nobody", user_id="u",
+             tags=["youtube"], description="https://youtu.be/one https://youtu.be/two"),
+    ]})
+    cog = log_feed.LogFeed(bot)
+
+    await cog._poll_guild(999)
+
+    # Card + a single follow-up carrying both links (one per line).
+    assert channel.send.await_count == 2
+    assert channel.send.await_args_list[1].args[0] == "https://youtu.be/one\nhttps://youtu.be/two"
 
 
 async def test_poll_no_url_message_for_non_youtube_log():
