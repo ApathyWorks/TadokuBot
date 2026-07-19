@@ -27,6 +27,13 @@ def isolated_config_store(tmp_path, monkeypatch):
     monkeypatch.setattr(config_store, "_PATH", str(tmp_path / "config.json"))
 
 
+@pytest.fixture(autouse=True)
+def reset_tadoku_auth(monkeypatch):
+    """Keep the tadoku client's module-level auth off (anonymous) by default so a
+    test that installs one can't leak it into the others."""
+    monkeypatch.setattr(tadoku_client, "_auth", None)
+
+
 @pytest.fixture
 def fake_bot():
     """A stand-in for TadokuBot with just the attributes cogs actually use."""

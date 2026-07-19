@@ -113,6 +113,16 @@ one member** (matching is case- and whitespace-insensitive, like `/score`).
    ```
    ADMIN_ROLES=Moderator,Officers
    ```
+   Optionally, log in to tadoku.app so API calls carry an authenticated session (needed if the
+   endpoints you use are gated/rate-limited). tadoku uses Ory Kratos, whose `ory_kratos_session`
+   cookie expires — the bot logs in with these credentials on startup and, when a request comes back
+   401/403, re-logs-in and retries automatically. Use a **dedicated bot account without 2FA** (2FA
+   blocks automated login). Leave blank to use the public endpoints anonymously (the default).
+   ```
+   TADOKU_EMAIL=bot@example.com
+   TADOKU_PASSWORD=your_password
+   # KRATOS_PUBLIC_URL defaults to https://account.tadoku.app/kratos
+   ```
 4. Run it:
    ```
    python main.py

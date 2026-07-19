@@ -7,6 +7,9 @@ fails the test. Also covers the error path (404 -> TadokuAPIError) and the
 bool-to-string query coercion.
 """
 
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
 import aiohttp
 import pytest
 
@@ -159,3 +162,62 @@ async def test_list_user_logs_returns_envelope_and_sends_paging(tadoku_server):
     [(path, query)] = tadoku_server.requests
     assert path == "/users/user-1/logs"
     assert query == {"page": "1", "page_size": "100"}
+
+
+# ---------------------------------------------------------------------------
+# authentication (Kratos session): login-before-first-call + 401 retry
+# ---------------------------------------------------------------------------
+
+def _fake_auth():
+    return SimpleNamespace(ensure_login=AsyncMock())
+
+
+async def test_get_logs_in_before_the_first_request(monkeypatch):
+    auth = _fake_auth()
+    monkeypatch.setattr(tadoku, "_auth", auth)
+    monkeypatch.setattr(tadoku, "_fetch", AsyncMock(return_value=(200, {"ok": True})))
+
+    data = await tadoku._get(SimpleNamespace(), "/x")
+
+    assert data == {"ok": True}
+    auth.ensure_login.assert_awaited()  # ensured a session before fetching
+
+
+async def test_get_refreshes_session_and_retries_on_401(monkeypatch):
+    auth = _fake_auth()
+    monkeypatch.setattr(tadoku, "_auth", auth)
+    monkeypatch.setattr(tadoku, "_fetch", AsyncMock(side_effect=[(401, None), (200, {"ok": 1})]))
+
+    data = await tadoku._get(SimpleNamespace(), "/x")
+
+    assert data == {"ok": 1}
+    assert tadoku._fetch.await_count == 2
+    # Two logins: the initial ensure, then a forced refresh after the 401.
+    assert auth.ensure_login.await_count == 2
+    assert auth.ensure_login.await_args_list[1].kwargs.get("force") is True
+
+
+async def test_get_raises_if_still_unauthorized_after_retry(monkeypatch):
+    monkeypatch.setattr(tadoku, "_auth", _fake_auth())
+    monkeypatch.setattr(tadoku, "_fetch", AsyncMock(side_effect=[(403, None), (403, None)]))
+
+    with pytest.raises(tadoku.TadokuAPIError):
+        await tadoku._get(SimpleNamespace(), "/x")
+
+
+async def test_get_without_auth_does_not_retry_on_401(monkeypatch):
+    # _auth defaults to None (reset fixture): a 401 just raises, no retry.
+    monkeypatch.setattr(tadoku, "_fetch", AsyncMock(side_effect=[(401, None)]))
+
+    with pytest.raises(tadoku.TadokuAPIError):
+        await tadoku._get(SimpleNamespace(), "/x")
+    assert tadoku._fetch.await_count == 1
+
+
+async def test_get_surfaces_login_failure_as_api_error(monkeypatch):
+    auth = SimpleNamespace(ensure_login=AsyncMock(side_effect=tadoku.TadokuAuthError("nope")))
+    monkeypatch.setattr(tadoku, "_auth", auth)
+    monkeypatch.setattr(tadoku, "_fetch", AsyncMock(return_value=(200, {})))
+
+    with pytest.raises(tadoku.TadokuAPIError):
+        await tadoku._get(SimpleNamespace(), "/x")

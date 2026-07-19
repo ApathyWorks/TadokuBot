@@ -17,6 +17,8 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+import lib.tadoku_auth as tadoku_auth
+import lib.tadoku_client as tadoku_client
 from lib.permissions import NotAdmin
 
 _log = logging.getLogger(__name__)
@@ -56,6 +58,13 @@ class TadokuBot(commands.Bot):
         tree with Discord.
         """
         self.session = aiohttp.ClientSession()
+        # If tadoku credentials are configured, install the Kratos login-session
+        # manager so API calls authenticate and refresh their session on expiry.
+        # With no credentials this is None and the client stays anonymous.
+        auth = tadoku_auth.KratosAuth.from_env()
+        tadoku_client.configure_auth(auth)
+        if auth is not None:
+            _log.info("tadoku.app authentication enabled (as %s)", auth.email)
         # Route every uncaught app-command exception through our handler below.
         self.tree.on_error = self.on_application_command_error
 
