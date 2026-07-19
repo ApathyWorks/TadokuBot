@@ -180,11 +180,14 @@ def _poster_image(poster_bytes: bytes, w: int, h: int, radius: int) -> Optional[
 
 
 def _draw_stat(draw: ImageDraw.ImageDraw, box, label: str, value: str) -> None:
-    """Draw one stat panel (rounded card with a small label over a big value)."""
+    """Draw one stat panel (rounded card with a small label over a big value).
+
+    Sized to fit four panels across the content row.
+    """
     x0, y0, x1, y1 = box
     draw.rounded_rectangle(box, radius=14 * SCALE, fill=PANEL_BG, outline=HAIRLINE, width=SCALE)
-    draw.text((x0 + 20 * SCALE, y0 + 22 * SCALE), label.upper(), font=_font(14 * SCALE, bold=True), fill=INK_SOFT)
-    draw.text((x0 + 20 * SCALE, y0 + 48 * SCALE), value, font=_font(32 * SCALE, bold=True), fill=INK)
+    draw.text((x0 + 18 * SCALE, y0 + 22 * SCALE), label.upper(), font=_font(13 * SCALE, bold=True), fill=INK_SOFT)
+    draw.text((x0 + 18 * SCALE, y0 + 48 * SCALE), value, font=_font(28 * SCALE, bold=True), fill=INK)
 
 
 def _render(
@@ -193,6 +196,7 @@ def _render(
     avatar_bytes: Optional[bytes],
     characters: float,
     pages: float,
+    comic_pages: float,
     listening_hours: float,
     this_log: str,
     title: str,
@@ -244,16 +248,17 @@ def _render(
     if subtitle:
         draw.text((content_x, 104 * S), subtitle, font=_font(22 * S), fill=INK_SOFT)
 
-    # Stat row: Characters | Pages | Listening.
+    # Stat row: Characters | Pages | Comic pages | Listening.
     stats = [
         ("Characters", _format_count(characters)),
         ("Pages", _format_count(pages)),
+        ("Comic pages", _format_count(comic_pages)),
         ("Listening", f"{listening_hours:.1f}h"),
     ]
     row_y = 160 * S
     panel_h = 108 * S
-    gap = 18 * S
-    panel_w = (right - content_x - 2 * gap) // 3
+    gap = 16 * S
+    panel_w = (right - content_x - 3 * gap) // 4
     for i, (label, value) in enumerate(stats):
         x0 = content_x + i * (panel_w + gap)
         _draw_stat(draw, (x0, row_y, x0 + panel_w, row_y + panel_h), label, value)
@@ -305,6 +310,7 @@ async def render_card(
     avatar_bytes: Optional[bytes] = None,
     characters: float = 0,
     pages: float = 0,
+    comic_pages: float = 0,
     listening_hours: float = 0,
     this_log: str = "",
     title: str = "",
@@ -317,6 +323,6 @@ async def render_card(
     original content-only card is returned unchanged.
     """
     return await asyncio.to_thread(
-        _render, display_name, subtitle, avatar_bytes, characters, pages, listening_hours,
-        this_log, title, poster_bytes,
+        _render, display_name, subtitle, avatar_bytes, characters, pages, comic_pages,
+        listening_hours, this_log, title, poster_bytes,
     )

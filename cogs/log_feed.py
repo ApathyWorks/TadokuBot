@@ -293,6 +293,7 @@ class LogFeed(commands.Cog):
                         avatar_bytes=avatar_bytes,
                         characters=lifetime["characters"],
                         pages=lifetime["pages"],
+                        comic_pages=lifetime["comic_pages"],
                         listening_hours=lifetime["minutes"] / 60,
                         this_log=_this_log_line(log),
                         # The material title now lives on the card (in the log callout).
@@ -327,7 +328,7 @@ class LogFeed(commands.Cog):
     async def _lifetime_stats(
         self, user_id: Optional[str], cache: dict[str, Optional[dict]]
     ) -> Optional[dict]:
-        """Return a user's all-time ``{characters, pages, minutes}``, or ``None``.
+        """Return ``{characters, pages, comic_pages, minutes}`` for a user, or ``None``.
 
         ``None`` when the id is missing or tadoku.app can't be reached. Results
         (including misses) are memoised in ``cache`` so a burst from one person
@@ -347,16 +348,22 @@ class LogFeed(commands.Cog):
 
     async def _compute_lifetime(self, user_id: str) -> dict:
         """Sum a user's logs since ``LIFETIME_START`` into characters / pages /
-        listening minutes.
+        comic pages / listening minutes.
 
-        Buckets each non-deleted log by its unit: anything with "character" in the
-        unit name counts as characters, "page" as pages (covers "Comic page"), and
-        "minute" as listening minutes ("Minute"/"Dense minute"). Logs arrive
+        Buckets each non-deleted log by its unit: "character" -> characters,
+        "comic" ("Comic page") -> comic_pages, "page" ("Page") -> pages, and
+        "minute" ("Minute"/"Dense minute") -> listening minutes. ``comic`` is
+        checked before ``page`` since "Comic page" contains "page". Logs arrive
         newest-first, so the first one before ``LIFETIME_START`` ends the walk
         (everything older is out of window). Pages the API by ``total_size``,
         bounded by ``LIFETIME_MAX_PAGES``.
         """
-        characters = pages = minutes = 0.0
+        characters = pages = comic_pages = minutes = 0.0
+
+        def _totals():
+            return {"characters": characters, "pages": pages,
+                    "comic_pages": comic_pages, "minutes": minutes}
+
         for page in range(LIFETIME_MAX_PAGES):
             data = await tadoku.list_user_logs(
                 self.bot.session, user_id, page=page, page_size=LOG_PAGE_SIZE
@@ -365,13 +372,15 @@ class LogFeed(commands.Cog):
             for log in logs:
                 # Newest-first: a log before the window means we're done entirely.
                 if leaderboard._parse_timestamp(log["created_at"]) < LIFETIME_START:
-                    return {"characters": characters, "pages": pages, "minutes": minutes}
+                    return _totals()
                 if log.get("deleted"):
                     continue
                 unit = (log.get("unit_name") or "").lower()
                 amount = log.get("amount") or 0
                 if "character" in unit:
                     characters += amount
+                elif "comic" in unit:  # "Comic page" -- before the plain "page" check
+                    comic_pages += amount
                 elif "page" in unit:
                     pages += amount
                 elif "minute" in unit:
@@ -379,7 +388,7 @@ class LogFeed(commands.Cog):
             # Stop at a short page or once we've covered the reported total.
             if len(logs) < LOG_PAGE_SIZE or (page + 1) * LOG_PAGE_SIZE >= data.get("total_size", 0):
                 break
-        return {"characters": characters, "pages": pages, "minutes": minutes}
+        return _totals()
 
     async def _avatar_bytes_for_id(
         self, uid: int, cache: dict[int, Optional[bytes]]

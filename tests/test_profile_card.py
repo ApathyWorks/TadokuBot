@@ -61,6 +61,16 @@ async def test_render_card_tolerates_garbage_avatar_bytes():
     assert _valid_png(data).size == (profile_card.WIDTH, profile_card.HEIGHT)
 
 
+async def test_render_card_shows_four_stats_including_comic_pages():
+    # Four stat panels (Characters / Pages / Comic pages / Listening) fit the same
+    # card size.
+    data = await profile_card.render_card(
+        display_name="ruby", characters=6_600_000, pages=1234, comic_pages=567,
+        listening_hours=42.3, this_log="Reading  ·  1 Page  ·  +1 pts",
+    )
+    assert _valid_png(data).size == (profile_card.WIDTH, profile_card.HEIGHT)
+
+
 async def test_render_card_draws_a_japanese_title_without_error():
     data = await profile_card.render_card(
         display_name="strangefella",

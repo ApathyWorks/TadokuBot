@@ -567,7 +567,7 @@ async def test_compute_lifetime_sums_by_unit_and_skips_deleted():
         "logs": [
             _ulog("Character", 1000),
             _ulog("Page", 10),
-            _ulog("Comic page", 5),          # counts as pages
+            _ulog("Comic page", 5),          # counts as comic pages, not pages
             _ulog("Minute", 30),
             _ulog("Dense minute", 60),        # listening
             _ulog("Sentence", 99),            # ignored (not requested)
@@ -578,7 +578,7 @@ async def test_compute_lifetime_sums_by_unit_and_skips_deleted():
 
     stats = await cog._compute_lifetime("user-1")
 
-    assert stats == {"characters": 1000, "pages": 15, "minutes": 90}
+    assert stats == {"characters": 1000, "pages": 10, "comic_pages": 5, "minutes": 90}
 
 
 async def test_compute_lifetime_stops_before_2026():
@@ -596,7 +596,7 @@ async def test_compute_lifetime_stops_before_2026():
 
     stats = await cog._compute_lifetime("user-1")
 
-    assert stats == {"characters": 0, "pages": 10, "minutes": 0}
+    assert stats == {"characters": 0, "pages": 10, "comic_pages": 0, "minutes": 0}
 
 
 async def test_compute_lifetime_pages_until_total_reached():
