@@ -62,6 +62,7 @@ def _clear_keys(monkeypatch):
     # Default to no API keys so tests are explicit about enabling a source.
     monkeypatch.delenv("MAL_CLIENT_ID", raising=False)
     monkeypatch.delenv("GOOGLE_BOOKS_API_KEY", raising=False)
+    monkeypatch.delenv("TMDB_API_KEY", raising=False)
 
 
 # ---------------------------------------------------------------------------
@@ -102,8 +103,14 @@ def test_clean_title_keeps_original_when_cleaning_would_empty_it():
     (["fiction", "game"], "game"),
     (["vn"], "vn"),
     (["vn", "game"], "vn"),  # vn wins so it stays VNDB-only, no Steam hop
-    (["anime", "tv"], "anime"),
+    (["anime", "tv"], "anime"),  # anime beats tv -> MyAnimeList, not TMDB
+    (["anime", "movie"], "anime"),
     (["comic", "manga"], "manga"),
+    (["tv"], "screen"),
+    (["movie"], "screen"),
+    (["show"], "screen"),
+    (["drama", "tv"], "screen"),  # live-action tv -> TMDB
+    (["video"], None),  # generic "video" isn't routed to TMDB
     (["podcast"], None),
 ])
 def test_category_routing(tags, expected):
@@ -244,6 +251,52 @@ async def test_google_books_parses_thumbnail_and_upgrades_to_https(monkeypatch):
     out = await poster_client.fetch_poster(session, ["book"], "雪国")
     assert out == b"BOOKCOVER"
     assert session.calls[1][1] == "https://books.google.com/c.jpg"  # http -> https
+
+
+async def test_tmdb_requires_key(monkeypatch):
+    session = _FakeSession([])  # no key -> must not call out
+    assert await poster_client.fetch_poster(session, ["tv"], "silent tokyo") is None
+    assert session.calls == []
+
+
+async def test_tmdb_lookup_parses_poster_and_cleans_title(monkeypatch):
+    monkeypatch.setenv("TMDB_API_KEY", "tkey")
+    session = _FakeSession([
+        _FakeResponse(json_data={"results": [
+            {"media_type": "person", "name": "Some Actor"},          # skipped
+            {"media_type": "tv", "poster_path": None},                # skipped (no poster)
+            {"media_type": "movie", "poster_path": "/abc123.jpg"},    # taken
+        ]}),
+        _FakeResponse(body=b"TMDBPOSTER"),
+    ])
+    out = await poster_client.fetch_poster(session, ["movie"], "silent tokyo 1")
+    assert out == b"TMDBPOSTER"
+    method, url, kwargs = session.calls[0]
+    assert method == "GET" and "api.themoviedb.org/3/search/multi" in url
+    assert kwargs["params"]["api_key"] == "tkey"
+    assert kwargs["params"]["query"] == "silent tokyo"  # cleaned of trailing "1"
+    # The download targets the built image URL at w500.
+    assert session.calls[1][1] == "https://image.tmdb.org/t/p/w500/abc123.jpg"
+
+
+async def test_tmdb_passes_japanese_title_through(monkeypatch):
+    monkeypatch.setenv("TMDB_API_KEY", "tkey")
+    session = _FakeSession([
+        _FakeResponse(json_data={"results": [{"media_type": "tv", "poster_path": "/jp.jpg"}]}),
+        _FakeResponse(body=b"JP"),
+    ])
+    out = await poster_client.fetch_poster(session, ["tv"], "半沢直樹")
+    assert out == b"JP"
+    assert session.calls[0][2]["params"]["query"] == "半沢直樹"
+
+
+async def test_tmdb_returns_none_when_no_screen_result(monkeypatch):
+    monkeypatch.setenv("TMDB_API_KEY", "tkey")
+    session = _FakeSession([
+        _FakeResponse(json_data={"results": [{"media_type": "person", "name": "X"}]}),
+    ])
+    assert await poster_client.fetch_poster(session, ["show"], "Nobody") is None
+    assert len(session.calls) == 1  # search only; no download attempted
 
 
 async def test_non_200_search_yields_none(monkeypatch):

@@ -11,6 +11,8 @@ This module maps a log to a poster image, by tag:
   * anime       -> MyAnimeList API v2 (needs ``MAL_CLIENT_ID``)
   * manga       -> MyAnimeList API v2 (needs ``MAL_CLIENT_ID``)
   * book        -> Google Books (needs ``GOOGLE_BOOKS_API_KEY`` for quota)
+  * tv/movie/show (live-action) -> TMDB (needs ``TMDB_API_KEY``); anime is routed
+                   to MyAnimeList above, so only non-anime screen media lands here
 
 Every lookup is strictly best-effort: a miss, a missing API key, or any
 network/parse failure yields ``None`` so the log feed simply falls back to the
@@ -59,6 +61,10 @@ def _category(tags: Optional[list]) -> Optional[str]:
         return "manga"
     if "book" in have:
         return "book"
+    # Live-action screen media: TV shows and films. ``anime`` is caught above, so
+    # a log tagged both (e.g. an anime that aired on TV) stays on MyAnimeList.
+    if have & {"tv", "movie", "show"}:
+        return "screen"
     return None
 
 
@@ -140,6 +146,8 @@ async def _image_url(
         return await _mal_image_url(session, category, title)
     if category == "book":
         return await _google_books_image_url(session, title)
+    if category == "screen":
+        return await _tmdb_image_url(session, title)
     return None
 
 
@@ -166,6 +174,39 @@ async def _mal_image_url(
         return None
     picture = nodes[0].get("node", {}).get("main_picture") or {}
     return picture.get("large") or picture.get("medium")
+
+
+async def _tmdb_image_url(
+    session: aiohttp.ClientSession, title: str
+) -> Optional[str]:
+    """Look up a live-action TV/movie poster on TMDB (``poster_path``).
+
+    Uses TMDB's *multi* search, which matches a title across both films and TV in
+    one call and matches Japanese titles well (TMDB indexes each work's original
+    and alternative-language titles). Needs ``TMDB_API_KEY`` (a v3 API key);
+    without it we skip (return ``None``) rather than error.
+    """
+    key = os.environ.get("TMDB_API_KEY")
+    if not key:
+        return None
+    params = {
+        "api_key": key,
+        "query": title,
+        "include_adult": "false",
+        # Prefer Japanese-language metadata/artwork where a work has it.
+        "language": "ja-JP",
+    }
+    async with session.get(
+        "https://api.themoviedb.org/3/search/multi", params=params, timeout=_TIMEOUT
+    ) as resp:
+        if resp.status != 200:
+            return None
+        data = await resp.json()
+    for result in data.get("results") or []:
+        # Skip ``person`` hits; take the first film/show that actually has a poster.
+        if result.get("media_type") in ("movie", "tv") and result.get("poster_path"):
+            return f"https://image.tmdb.org/t/p/w500{result['poster_path']}"
+    return None
 
 
 async def _vndb_image_url(
