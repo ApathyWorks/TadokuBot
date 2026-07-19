@@ -1,10 +1,11 @@
-"""Help cog: the ``/tadokubot`` command and the online announcement.
+"""Help cog: the ``/tadokubot`` and ``/tadokutag`` commands + the online announcement.
 
 ``/tadokubot`` shows everyone a grouped list of the bot's commands (general vs
-Manage-Server-only). When the bot first connects, it also posts a short "I'm
-online — run /tadokubot" pointer to each server's existing bot channel (its log
-feed channel, or failing that its alerts channel), so members discover the
-command list without an admin having to advertise it.
+Manage-Server-only); ``/tadokutag`` explains which tadoku.app tag to put on a log
+so its cover (or link) shows on the log-feed card. When the bot first connects,
+it also posts a short "I'm online — run /tadokubot" pointer to each server's
+existing bot channel (its log feed channel, or failing that its alerts channel),
+so members discover the command list without an admin having to advertise it.
 """
 
 import logging
@@ -25,6 +26,7 @@ REPO_URL = "https://github.com/ApathyWorks/TadokuBot"
 # drifts out of the list" test share one source of truth.
 GENERAL_COMMANDS = [
     ("/tadokubot", "Show this list of commands."),
+    ("/tadokutag", "How to tag a log so its cover / link shows on the card."),
     ("/leaderboard", "This server's contest leaderboard."),
     ("/score", "Look up one person's rank and score in the contest."),
     ("/weeklyleaderboard", "Ranking of points logged in the last 7 days."),
@@ -33,6 +35,18 @@ GENERAL_COMMANDS = [
     ("/claim", "Link your Discord account to your tadoku.app username."),
     ("/unclaim", "Remove the username you claimed."),
     ("/unclaimedlist", "List contest participants nobody has claimed yet."),
+]
+
+# Which tadoku.app tag makes each kind of material show a cover (or link) on the
+# log card. (tag label, what it produces.) One source of truth for the embed.
+MEDIA_TAGS = [
+    ("vn", "Visual-novel cover (VNDB)"),
+    ("game", "Game cover (VNDB, then Steam)"),
+    ("anime", "Anime cover (MyAnimeList)"),
+    ("manga", "Manga cover (MyAnimeList)"),
+    ("book", "Book cover (Google Books)"),
+    ("tv / movie / show", "Live-action film or TV cover (TMDB)"),
+    ("youtube", "Posts the video link from the log's description under the card"),
 ]
 
 ADMIN_COMMANDS = [
@@ -67,6 +81,33 @@ def build_help_embed() -> discord.Embed:
     return embed
 
 
+def build_tag_embed() -> discord.Embed:
+    """Render the media-tag guide as an embed."""
+    embed = discord.Embed(
+        title="🏷️ Tagging your tadoku logs",
+        description=(
+            "When you log immersion on tadoku.app, add one of these **tags** so the "
+            "bot can show the material's cover (or link) on your log card:"
+        ),
+        color=discord.Color.blurple(),
+    )
+    embed.add_field(
+        name="Tag → what shows",
+        value="\n".join(f"**{tag}** — {shows}" for tag, shows in MEDIA_TAGS),
+        inline=False,
+    )
+    embed.add_field(
+        name="Notes",
+        value=(
+            "• Covers appear on the **profile card** — link your account first with `/claim`.\n"
+            "• For a **youtube** log, paste the video URL into the log's description.\n"
+            "• No matching tag just means a plain card (no cover)."
+        ),
+        inline=False,
+    )
+    return embed
+
+
 def _startup_channel_id(guild_id: int) -> int | None:
     """Where to post the online announcement for a guild, or ``None`` to skip.
 
@@ -95,6 +136,14 @@ class Help(commands.Cog):
     async def tadokubot(self, interaction: discord.Interaction):
         """Show the grouped command list (ephemeral, so it never clutters chat)."""
         await interaction.response.send_message(embed=build_help_embed(), ephemeral=True)
+
+    @app_commands.command(
+        name="tadokutag",
+        description="How to tag your tadoku logs so a cover or link shows on the card.",
+    )
+    async def tadokutag(self, interaction: discord.Interaction):
+        """Explain the media tags that trigger a poster/link (ephemeral)."""
+        await interaction.response.send_message(embed=build_tag_embed(), ephemeral=True)
 
     @commands.Cog.listener()
     async def on_ready(self) -> None:

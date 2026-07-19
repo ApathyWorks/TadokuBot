@@ -42,6 +42,21 @@ async def test_tadokubot_replies_with_grouped_ephemeral_embed(fake_bot):
     assert help_cog.REPO_URL in body
 
 
+async def test_tadokutag_replies_with_tag_guide_embed(fake_bot):
+    cog = help_cog.Help(fake_bot)
+    interaction = make_interaction(guild_id=999)
+
+    await help_cog.Help.tadokutag.callback(cog, interaction)
+
+    args, kwargs = interaction.response.send_message.await_args
+    assert kwargs.get("ephemeral") is True
+    body = "\n".join(f.value for f in kwargs["embed"].fields)
+    # A representative tag per source, plus the /claim note.
+    assert "vn" in body and "anime" in body and "youtube" in body
+    assert "TMDB" in body and "VNDB" in body
+    assert "/claim" in body
+
+
 def test_admin_commands_are_the_manage_server_ones():
     admin_names = {n.lstrip("/").split()[0] for n, _ in help_cog.ADMIN_COMMANDS}
     assert admin_names == {"set_contest", "shame", "alerts", "log", "autoclaim"}
