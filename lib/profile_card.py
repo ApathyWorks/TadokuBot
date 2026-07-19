@@ -87,6 +87,16 @@ def _font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont:
     return ImageFont.load_default(size)
 
 
+def _oneline(text: str) -> str:
+    """Collapse all whitespace (incl. newlines/tabs) to single spaces and strip.
+
+    Pillow's single-line text drawing raises "can't measure length of multiline
+    text" on any embedded newline, and log titles sometimes contain them, so every
+    string drawn on the card is flattened to one line first.
+    """
+    return " ".join((text or "").split())
+
+
 def _truncate(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.FreeTypeFont, max_width: int) -> str:
     """Trim ``text`` (adding an ellipsis) so it fits within ``max_width`` pixels."""
     if draw.textlength(text, font=font) <= max_width:
@@ -190,6 +200,12 @@ def _render(
 ) -> bytes:
     """Compose the card and return PNG bytes (runs on a worker thread)."""
     S = SCALE
+    # Flatten every user-supplied string to one line: Pillow can't draw/measure
+    # text with embedded newlines (which some log titles carry).
+    display_name = _oneline(display_name)
+    subtitle = _oneline(subtitle)
+    this_log = _oneline(this_log)
+    title = _oneline(title)
     # A decodable poster widens the card by a right-hand column; anything else
     # (no bytes, or undecodable bytes) renders the original content-only card.
     poster = (

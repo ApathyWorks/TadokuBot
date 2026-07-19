@@ -448,6 +448,30 @@ async def test_poll_card_uses_placeholder_when_avatar_read_fails():
     assert profile_card.render_card.await_args.kwargs["avatar_bytes"] is None
 
 
+async def test_poll_falls_back_to_embed_when_card_render_raises(monkeypatch):
+    # A render crash for one log must NOT freeze the guild's feed: it degrades to
+    # the plain embed, the poll completes, and last_seen still advances.
+    monkeypatch.setattr(profile_card, "render_card", AsyncMock(side_effect=ValueError("boom")))
+    channel = _channel(cid=555)
+    bot = _bot_with_channel(channel)
+    bot.get_user = lambda uid: _user_with_avatar() if uid == 111 else None
+    config_store.set_guild_logfeed(999, enabled=True, channel_id=555, last_seen=CUTOFF)
+    config_store.set_claim(999, 111, "ruby")
+    tadoku_client.list_contest_logs.side_effect = _pager({0: [
+        _log("2026-07-05T21:00:00Z", name="ruby", user_id="u"),
+    ]})
+    tadoku_client.list_user_logs.return_value = {"logs": [], "total_size": 0}
+    cog = log_feed.LogFeed(bot)
+
+    await cog._poll_guild(999)  # must not raise
+
+    sent = _sent(channel)
+    assert sent.get("file") is None
+    assert sent["embed"] is not None  # degraded to the plain embed
+    # Poll completed, so the high-water mark advanced (feed not frozen).
+    assert config_store.get_guild_logfeed(999)["last_seen"] == "2026-07-05T21:00:00Z"
+
+
 # ---------------------------------------------------------------------------
 # stats since 2026 (_compute_lifetime)
 # ---------------------------------------------------------------------------

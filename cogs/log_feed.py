@@ -258,20 +258,24 @@ class LogFeed(commands.Cog):
             if lifetime is not None:
                 avatar_bytes = await self._avatar_bytes_for_id(claimer, avatar_cache)
                 poster_bytes = await self._poster_bytes_for(log, poster_cache)
-                png = await profile_card.render_card(
-                    display_name=name,
-                    subtitle="Immersion since 2026",
-                    avatar_bytes=avatar_bytes,
-                    characters=lifetime["characters"],
-                    pages=lifetime["pages"],
-                    listening_hours=lifetime["minutes"] / 60,
-                    this_log=_this_log_line(log),
-                    # The material title now lives on the card (in the log callout).
-                    title=(log.get("description") or "").strip(),
-                    # A cover for the tagged material, drawn on the right (or None).
-                    poster_bytes=poster_bytes,
-                )
-                return {"file": discord.File(io.BytesIO(png), filename="log.png")}
+                try:
+                    png = await profile_card.render_card(
+                        display_name=name,
+                        subtitle="Immersion since 2026",
+                        avatar_bytes=avatar_bytes,
+                        characters=lifetime["characters"],
+                        pages=lifetime["pages"],
+                        listening_hours=lifetime["minutes"] / 60,
+                        this_log=_this_log_line(log),
+                        # The material title now lives on the card (in the log callout).
+                        title=(log.get("description") or "").strip(),
+                        # A cover for the tagged material, drawn on the right (or None).
+                        poster_bytes=poster_bytes,
+                    )
+                    return {"file": discord.File(io.BytesIO(png), filename="log.png")}
+                except Exception:  # noqa: BLE001 -- a render failure must never freeze
+                    # the whole guild's feed; degrade to the plain embed for this log.
+                    _log.exception("Log feed: profile card render failed for %r; using embed", name)
 
         return {"embed": _format_log_embed(log)}
 

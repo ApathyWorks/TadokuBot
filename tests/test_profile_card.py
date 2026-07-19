@@ -78,6 +78,23 @@ async def test_render_card_truncates_an_overlong_title():
     assert _valid_png(data).size == (profile_card.WIDTH, profile_card.HEIGHT)
 
 
+def test_oneline_collapses_newlines_and_whitespace():
+    assert profile_card._oneline("a\nb\tc  d") == "a b c d"
+    assert profile_card._oneline("  x \r\n ") == "x"
+    assert profile_card._oneline("") == ""
+
+
+async def test_render_card_handles_a_newline_in_the_title():
+    # Regression: Pillow raises "can't measure length of multiline text" on an
+    # embedded newline; the renderer must flatten it, not crash.
+    data = await profile_card.render_card(
+        display_name="Kanji\nEater",
+        this_log="Reading  ·  1 Page  ·  +1 pts",
+        title="Slowness is a sin\nhttps://example.com/very/long/link",
+    )
+    assert _valid_png(data).size == (profile_card.WIDTH, profile_card.HEIGHT)
+
+
 async def test_render_card_with_poster_widens_the_card():
     # A decodable poster adds the right-hand column, widening the card.
     buf = io.BytesIO()
