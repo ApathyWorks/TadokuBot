@@ -40,11 +40,11 @@ def patched(monkeypatch):
 
 
 def _log(created_at, name="ruby", score=10, deleted=False, activity="Reading",
-         amount=5, unit="Page", language="Japanese", description=None, user_id=None):
+         amount=5, unit="Page", language="Japanese", description=None, user_id=None, tags=None):
     return {
         "created_at": created_at, "user_display_name": name, "score": score, "deleted": deleted,
         "activity": activity, "amount": amount, "unit_name": unit,
-        "language": language, "description": description, "user_id": user_id,
+        "language": language, "description": description, "user_id": user_id, "tags": tags,
     }
 
 
@@ -132,6 +132,28 @@ def test_this_log_line_has_activity_amount_points_no_language():
                                         language="Japanese", score=192))
     assert "Reading" in line and "192 Page" in line and "+192 pts" in line
     assert "Japanese" not in line  # language deliberately dropped from the card
+
+
+# ---------------------------------------------------------------------------
+# _youtube_url
+# ---------------------------------------------------------------------------
+
+def test_youtube_url_extracts_link_from_description():
+    log = _log(CUTOFF, tags=["youtube"], description="面白い動画 https://youtu.be/abc123")
+    assert log_feed._youtube_url(log) == "https://youtu.be/abc123"
+
+
+def test_youtube_url_none_without_the_youtube_tag():
+    # A URL in the description but no youtube tag -> we don't post the link.
+    assert log_feed._youtube_url(_log(CUTOFF, tags=["video"], description="https://youtu.be/x")) is None
+
+
+def test_youtube_url_none_when_description_has_no_url():
+    assert log_feed._youtube_url(_log(CUTOFF, tags=["youtube"], description="just a title")) is None
+
+
+def test_youtube_url_none_without_tags():
+    assert log_feed._youtube_url(_log(CUTOFF, description="https://youtu.be/x")) is None
 
 
 # ---------------------------------------------------------------------------
@@ -388,6 +410,38 @@ async def test_poll_plain_embed_for_unclaimed_logger():
     assert sent["embed"].author.icon_url is None
     profile_card.render_card.assert_not_awaited()
     tadoku_client.list_user_logs.assert_not_awaited()
+
+
+async def test_poll_posts_youtube_url_under_the_card():
+    channel = _channel(cid=555)
+    bot = _bot_with_channel(channel)
+    config_store.set_guild_logfeed(999, enabled=True, channel_id=555, last_seen=CUTOFF)
+    tadoku_client.list_contest_logs.side_effect = _pager({0: [
+        _log("2026-07-05T21:00:00Z", name="nobody", user_id="u",
+             tags=["youtube"], description="すごい動画 https://youtu.be/xyz"),
+    ]})
+    cog = log_feed.LogFeed(bot)
+
+    await cog._poll_guild(999)
+
+    # Two messages: the card, then the link beneath it.
+    assert channel.send.await_count == 2
+    assert channel.send.await_args_list[0].kwargs.get("embed") is not None  # the card
+    assert channel.send.await_args_list[1].args[0] == "https://youtu.be/xyz"  # the URL
+
+
+async def test_poll_no_url_message_for_non_youtube_log():
+    channel = _channel(cid=555)
+    bot = _bot_with_channel(channel)
+    config_store.set_guild_logfeed(999, enabled=True, channel_id=555, last_seen=CUTOFF)
+    tadoku_client.list_contest_logs.side_effect = _pager({0: [
+        _log("2026-07-05T21:00:00Z", tags=["video"], description="title https://youtu.be/x"),
+    ]})
+    cog = log_feed.LogFeed(bot)
+
+    await cog._poll_guild(999)
+
+    assert channel.send.await_count == 1  # just the card; no link follow-up
 
 
 async def test_poll_falls_back_to_embed_when_lifetime_lookup_fails():

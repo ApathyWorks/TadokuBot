@@ -12,6 +12,10 @@ their immersion stats since the start of 2026 (characters, pages, listening hour
 — summed live from tadoku.app's per-user log history), and this log. Everyone
 else gets the plain embed card.
 
+A ``youtube``-tagged log whose description contains a URL also gets that link
+posted as a follow-up message beneath the card, so Discord renders a playable
+preview.
+
 The poller keeps a per-guild ``last_seen`` high-water mark (the ``created_at`` of
 the newest log already posted) so it never repeats a log or dumps a backlog: on
 enable the mark is seeded to "now", and each poll posts only logs newer than it.
@@ -20,6 +24,7 @@ enable the mark is seeded to "now", and each poll posts only logs newer than it.
 
 import io
 import logging
+import re
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -97,6 +102,25 @@ def _claimer_id(claims: dict[str, str], name: str) -> Optional[int]:
         if leaderboard._normalize_name(claimed) == target:
             return int(uid)
     return None
+
+
+# First http(s) URL in a string (stops at whitespace).
+_URL_RE = re.compile(r"https?://\S+")
+
+
+def _youtube_url(log: dict) -> Optional[str]:
+    """The URL in a YouTube-tagged log's description, or ``None``.
+
+    Only fires when the log carries a ``youtube`` tag and its description holds a
+    URL, so the feed can post that link under the card (Discord renders a
+    playable preview). Any trailing punctuation Discord would choke on is left
+    as-is -- log URLs are pasted, not prose.
+    """
+    tags = {str(t).lower() for t in (log.get("tags") or [])}
+    if "youtube" not in tags:
+        return None
+    match = _URL_RE.search(log.get("description") or "")
+    return match.group(0) if match else None
 
 
 def _this_log_line(log: dict) -> str:
@@ -227,6 +251,11 @@ class LogFeed(commands.Cog):
                 log, claims, avatar_cache, lifetime_cache, poster_cache
             )
             await self._post(settings["channel_id"], **message)
+            # For a YouTube log, drop the video link under the card as its own
+            # message so Discord renders a playable preview beneath it.
+            url = _youtube_url(log)
+            if url:
+                await self._post(settings["channel_id"], content=url)
         if overflow > 0:
             await self._post(
                 settings["channel_id"],
