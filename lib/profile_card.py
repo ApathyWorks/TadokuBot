@@ -20,7 +20,7 @@ import asyncio
 import io
 from typing import Optional
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageChops, ImageDraw, ImageFont
 
 # Everything is authored in logical pixels and multiplied by SCALE when drawn,
 # then the canvas is downsampled back to logical size for crisp antialiasing.
@@ -221,10 +221,12 @@ def _render(
     img = Image.new("RGBA", (card_w * S, HEIGHT * S), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
 
-    # Rounded dark ground with a hairline border; corners left transparent.
-    draw.rounded_rectangle(
-        (0, 0, card_w * S - 1, HEIGHT * S - 1), radius=28 * S, fill=BG, outline=HAIRLINE, width=S
-    )
+    outer_box = (0, 0, card_w * S - 1, HEIGHT * S - 1)
+    outer_radius = 28 * S
+
+    # Rounded dark ground. The border is drawn last, after every layer has been
+    # clipped to this same silhouette, so the accent cannot cover it.
+    draw.rounded_rectangle(outer_box, radius=outer_radius, fill=BG)
     # Purple accent stripe down the left edge.
     draw.rounded_rectangle((0, 0, 10 * S, HEIGHT * S - 1), radius=10 * S, fill=ACCENT)
     draw.rectangle((6 * S, 0, 12 * S, HEIGHT * S - 1), fill=ACCENT)
@@ -295,6 +297,20 @@ def _render(
             (px0, py0, px0 + POSTER_W * S - 1, py0 + POSTER_H * S - 1),
             radius=14 * S, outline=HAIRLINE, width=S,
         )
+
+    # Clip the completed composition to one shared outer mask. In particular,
+    # this removes the square caps from the accent's fill rectangle at the
+    # top-left and bottom-left corners.
+    outer_mask = Image.new("L", img.size, 0)
+    ImageDraw.Draw(outer_mask).rounded_rectangle(
+        outer_box, radius=outer_radius, fill=255
+    )
+    img.putalpha(ImageChops.multiply(img.getchannel("A"), outer_mask))
+
+    # Restore a crisp border on top of the clipped artwork.
+    ImageDraw.Draw(img).rounded_rectangle(
+        outer_box, radius=outer_radius, outline=HAIRLINE, width=S
+    )
 
     # Downsample for antialiasing, flatten onto transparency-friendly RGBA PNG.
     img = img.resize((card_w, HEIGHT), Image.LANCZOS)

@@ -38,6 +38,21 @@ async def test_render_card_returns_png_of_expected_size():
     assert img.size == (profile_card.WIDTH, profile_card.HEIGHT)
 
 
+async def test_render_card_clips_accent_to_outer_rounded_corners():
+    data = await profile_card.render_card(
+        display_name="ruby",
+        this_log="Reading  ·  1 Page  ·  +1 pts",
+    )
+    img = _valid_png(data).convert("RGBA")
+
+    # The old square accent-fill rectangle made these pixels opaque purple,
+    # beyond the card's larger 28 px outer corner radius.
+    assert img.getpixel((7, 0))[3] < 16
+    assert img.getpixel((7, profile_card.HEIGHT - 1))[3] < 16
+    # The stripe itself remains solid through the straight middle section.
+    assert img.getpixel((7, profile_card.HEIGHT // 2))[:3] == profile_card.ACCENT
+
+
 async def test_render_card_accepts_a_real_avatar_image():
     # A tiny real PNG as the avatar; the renderer should crop/mask it without error.
     buf = io.BytesIO()
