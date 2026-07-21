@@ -19,7 +19,8 @@ import lib.profile_card as profile_card
 import lib.tadoku_client as tadoku_client
 from tests.conftest import make_interaction
 
-CONTEST = {"id": "c1", "title": "2026 Round 4"}
+CONTEST = {"id": "c1", "title": "2026 Round 4",
+           "contest_start": "2026-07-01", "contest_end": "2026-07-31"}
 CUTOFF = "2026-07-05T20:00:00Z"
 
 
@@ -29,8 +30,8 @@ def patched(monkeypatch):
     monkeypatch.setattr(tadoku_client, "get_latest_official_contest", AsyncMock(return_value=CONTEST))
     monkeypatch.setattr(tadoku_client, "get_contest", AsyncMock(return_value=CONTEST))
     monkeypatch.setattr(tadoku_client, "list_contest_logs", AsyncMock(return_value=[]))
-    # Per-user lifetime lookup; empty by default so claimed-logger cards show zero
-    # stats unless a test provides history.
+    # Per-user contest-stats lookup; empty by default so claimed-logger cards show
+    # zero stats unless a test provides history.
     monkeypatch.setattr(
         tadoku_client, "list_user_logs", AsyncMock(return_value={"logs": [], "total_size": 0})
     )
@@ -331,7 +332,7 @@ async def test_poll_renders_image_card_for_claimed_logger():
     sent = _sent(channel)
     assert isinstance(sent["file"], discord.File)
     assert sent.get("embed") is None
-    # Renderer got the logger's name, avatar bytes, lifetime stats and this-log line.
+    # Renderer got the logger's name, avatar bytes, contest stats and this-log line.
     kwargs = profile_card.render_card.await_args.kwargs
     assert kwargs["display_name"] == "Ruby"
     assert kwargs["avatar_bytes"] == b"AV"
@@ -511,7 +512,7 @@ async def test_poll_no_url_message_for_non_youtube_log():
     assert channel.send.await_count == 1  # just the card; no link follow-up
 
 
-async def test_poll_falls_back_to_embed_when_lifetime_lookup_fails():
+async def test_poll_falls_back_to_embed_when_contest_stats_lookup_fails():
     channel = _channel(cid=555)
     bot = _bot_with_channel(channel)
     bot.get_user = lambda uid: _user_with_avatar() if uid == 111 else None
@@ -594,10 +595,10 @@ async def test_poll_falls_back_to_embed_when_card_render_raises(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# stats since 2026 (_compute_lifetime)
+# contest-scoped stats (_compute_contest_totals)
 # ---------------------------------------------------------------------------
 
-# A timestamp comfortably inside the window (>= 2026-01-01).
+# A timestamp comfortably inside CONTEST's window (2026-07-01 .. 2026-07-31).
 IN_WINDOW = "2026-07-05T20:00:00Z"
 
 
@@ -605,7 +606,7 @@ def _ulog(unit, amount, deleted=False, created_at=IN_WINDOW):
     return {"unit_name": unit, "amount": amount, "deleted": deleted, "created_at": created_at}
 
 
-async def test_compute_lifetime_sums_by_unit_and_skips_deleted():
+async def test_compute_contest_totals_sums_by_unit_and_skips_deleted():
     cog = log_feed.LogFeed(SimpleNamespace(session=AsyncMock()))
     tadoku_client.list_user_logs.return_value = {
         "logs": [
@@ -620,30 +621,50 @@ async def test_compute_lifetime_sums_by_unit_and_skips_deleted():
         "total_size": 7,
     }
 
-    stats = await cog._compute_lifetime("user-1")
+    stats = await cog._compute_contest_totals("user-1", CONTEST)
 
     assert stats == {"characters": 1000, "pages": 10, "comic_pages": 5, "minutes": 90}
 
 
-async def test_compute_lifetime_stops_before_2026():
-    # Newest-first: an in-window log, then one from 2025 which ends the walk (so a
-    # still-older in-window-looking entry after it is never counted).
+async def test_compute_contest_totals_stops_before_contest_start():
+    # Newest-first: an in-window log, then one from before the contest which ends
+    # the walk (so a still-older in-window-looking entry after it is never counted).
     cog = log_feed.LogFeed(SimpleNamespace(session=AsyncMock()))
     tadoku_client.list_user_logs.return_value = {
         "logs": [
-            _ulog("Page", 10, created_at="2026-01-02T00:00:00Z"),
-            _ulog("Page", 999, created_at="2025-12-31T23:59:59Z"),  # before 2026 -> stop
-            _ulog("Page", 999, created_at="2026-05-01T00:00:00Z"),  # never reached
+            _ulog("Page", 10, created_at="2026-07-05T00:00:00Z"),
+            _ulog("Page", 999, created_at="2026-06-30T23:59:59Z"),  # before start -> stop
+            _ulog("Page", 999, created_at="2026-07-10T00:00:00Z"),  # never reached
         ],
         "total_size": 3,
     }
 
-    stats = await cog._compute_lifetime("user-1")
+    stats = await cog._compute_contest_totals("user-1", CONTEST)
 
     assert stats == {"characters": 0, "pages": 10, "comic_pages": 0, "minutes": 0}
 
 
-async def test_compute_lifetime_pages_until_total_reached():
+async def test_compute_contest_totals_skips_logs_after_contest_end():
+    # Newest-first: a log after the contest is skipped (not counted), an in-window
+    # log is summed, then a pre-contest log ends the walk. The final day (07-31)
+    # counts in full; 08-01 does not.
+    cog = log_feed.LogFeed(SimpleNamespace(session=AsyncMock()))
+    tadoku_client.list_user_logs.return_value = {
+        "logs": [
+            _ulog("Page", 999, created_at="2026-08-01T00:00:00Z"),  # after end -> skip
+            _ulog("Page", 7, created_at="2026-07-31T23:00:00Z"),    # last day -> counts
+            _ulog("Page", 10, created_at="2026-07-15T00:00:00Z"),   # in window
+            _ulog("Page", 999, created_at="2026-06-15T00:00:00Z"),  # before start -> stop
+        ],
+        "total_size": 4,
+    }
+
+    stats = await cog._compute_contest_totals("user-1", CONTEST)
+
+    assert stats == {"characters": 0, "pages": 17, "comic_pages": 0, "minutes": 0}
+
+
+async def test_compute_contest_totals_pages_until_total_reached():
     cog = log_feed.LogFeed(SimpleNamespace(session=AsyncMock()))
     full = [_ulog("Page", 1) for _ in range(log_feed.LOG_PAGE_SIZE)]
     pages = {
@@ -656,7 +677,7 @@ async def test_compute_lifetime_pages_until_total_reached():
 
     tadoku_client.list_user_logs.side_effect = serve
 
-    stats = await cog._compute_lifetime("user-1")
+    stats = await cog._compute_contest_totals("user-1", CONTEST)
 
     assert stats["pages"] == log_feed.LOG_PAGE_SIZE + 1
     assert tadoku_client.list_user_logs.await_count == 2

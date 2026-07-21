@@ -9,9 +9,9 @@ the card carries their Discord avatar.
 If the logger has linked their Discord account via ``/claim``, the log posts as a
 rendered image **profile card** (see ``lib.profile_card``): their Discord avatar,
 their place and score in the current contest (as the card's subtitle), their
-immersion stats since the start of 2026 (characters, pages, listening hours —
-summed live from tadoku.app's per-user log history), and this log. Everyone else
-gets the plain embed card.
+stats for that contest (characters, pages, listening hours — summed live from
+tadoku.app's per-user log history, restricted to the contest's date window), and
+this log. Everyone else gets the plain embed card.
 
 A ``youtube``-tagged log whose description contains URL(s) also gets them posted
 as a follow-up message beneath the card, so Discord renders a playable preview
@@ -26,7 +26,7 @@ enable the mark is seeded to "now", and each poll posts only logs newer than it.
 import io
 import logging
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import discord
@@ -60,11 +60,7 @@ MAX_POSTS_PER_POLL = 20
 # Safety cap on pages walked when summing a user's log history for the profile
 # stats. 50 x 100 = 5,000 logs covers any realistic member; it just bounds the
 # pathological case (and the cost, since this runs per claimed logger).
-LIFETIME_MAX_PAGES = 50
-
-# The profile card's stats are summed from this date forward (not truly all-time):
-# everything logged since the start of 2026, accumulating going ahead.
-LIFETIME_START = datetime(2026, 1, 1, tzinfo=timezone.utc)
+CONTEST_LOG_MAX_PAGES = 50
 
 # Emoji per activity name, with a neutral fallback.
 _ACTIVITY_EMOJI = {"Reading": "📖", "Listening": "🎧"}
@@ -80,6 +76,23 @@ _ACTIVITY_COLOR = {
 def _format_points(score) -> str:
     """Render a score without a pointless trailing ``.0`` (192, 7.2, 3)."""
     return f"{score:.1f}".rstrip("0").rstrip(".")
+
+
+def _contest_window(contest: dict) -> tuple[datetime, datetime]:
+    """Return the ``[start, end)`` UTC datetimes spanning ``contest``'s days.
+
+    ``contest_start``/``contest_end`` are inclusive calendar dates (e.g.
+    "2026-07-01"); both are normalised to midnight UTC and the end is widened to
+    the following midnight, so a log made any time on the contest's final day
+    still falls inside the half-open window.
+    """
+    def _midnight(value: str) -> datetime:
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.replace(hour=0, minute=0, second=0, microsecond=0)
+
+    return _midnight(contest["contest_start"]), _midnight(contest["contest_end"]) + timedelta(days=1)
 
 
 def _activity_name(log: dict) -> str:
@@ -141,7 +154,7 @@ def _format_log_embed(log: dict, avatar_url: Optional[str] = None) -> discord.Em
 
     Used for loggers who haven't linked their Discord account (claimed loggers
     get the richer rendered image card instead), and as a fallback when the
-    lifetime lookup fails. ``avatar_url`` is shown beside the name when known.
+    contest-stats lookup fails. ``avatar_url`` is shown beside the name when known.
     """
     activity = _activity_name(log)
     emoji = _ACTIVITY_EMOJI.get(activity, "📝")
@@ -240,16 +253,16 @@ class LogFeed(commands.Cog):
             to_post = to_post[-MAX_POSTS_PER_POLL:]
 
         # Claim map for this guild: a claimed logger gets the rendered profile
-        # card (avatar + lifetime stats); everyone else gets the plain embed. The
-        # caches memoise per-user avatar/lifetime lookups across a burst.
+        # card (avatar + contest stats); everyone else gets the plain embed. The
+        # caches memoise per-user avatar/stats lookups across a burst.
         claims = config_store.get_guild_claims(guild_id)
         avatar_cache: dict[int, Optional[bytes]] = {}
-        lifetime_cache: dict[str, Optional[dict]] = {}
+        stats_cache: dict[str, Optional[dict]] = {}
         poster_cache: dict[tuple, Optional[bytes]] = {}
         standing_cache: dict[str, str] = {}
         for log in to_post:
             message = await self._message_for(
-                log, contest, claims, avatar_cache, lifetime_cache,
+                log, contest, claims, avatar_cache, stats_cache,
                 poster_cache, standing_cache,
             )
             await self._post(settings["channel_id"], **message)
@@ -272,24 +285,24 @@ class LogFeed(commands.Cog):
         contest: dict,
         claims: dict[str, str],
         avatar_cache: dict[int, Optional[bytes]],
-        lifetime_cache: dict[str, Optional[dict]],
+        stats_cache: dict[str, Optional[dict]],
         poster_cache: dict[tuple, Optional[bytes]],
         standing_cache: dict[str, str],
     ) -> dict:
         """Build the ``send`` kwargs for one log.
 
-        A claimed logger whose lifetime stats we can fetch gets the rendered image
+        A claimed logger whose contest stats we can fetch gets the rendered image
         profile card (``file=``) -- the material title is drawn on the card itself,
         the card's subtitle shows their place and score in ``contest``, and when
         the log is tagged with a media type we recognise (anime/manga/game/book)
         its cover is drawn on the right. Everyone else -- and a claimed logger whose
-        lifetime lookup fails -- gets the plain embed card.
+        stats lookup fails -- gets the plain embed card.
         """
         name = (log.get("user_display_name") or "Someone").strip()
         claimer = _claimer_id(claims, name)
         if claimer is not None:
-            lifetime = await self._lifetime_stats(log.get("user_id"), lifetime_cache)
-            if lifetime is not None:
+            stats = await self._contest_stats(log.get("user_id"), contest, stats_cache)
+            if stats is not None:
                 avatar_bytes = await self._avatar_bytes_for_id(claimer, avatar_cache)
                 poster_bytes = await self._poster_bytes_for(log, poster_cache)
                 subtitle = await self._contest_standing(contest, name, standing_cache)
@@ -298,10 +311,10 @@ class LogFeed(commands.Cog):
                         display_name=name,
                         subtitle=subtitle,
                         avatar_bytes=avatar_bytes,
-                        characters=lifetime["characters"],
-                        pages=lifetime["pages"],
-                        comic_pages=lifetime["comic_pages"],
-                        listening_hours=lifetime["minutes"] / 60,
+                        characters=stats["characters"],
+                        pages=stats["pages"],
+                        comic_pages=stats["comic_pages"],
+                        listening_hours=stats["minutes"] / 60,
                         this_log=_this_log_line(log),
                         # The material title now lives on the card (in the log callout).
                         title=(log.get("description") or "").strip(),
@@ -365,10 +378,11 @@ class LogFeed(commands.Cog):
             _log.warning("Log feed: poster lookup failed for %r", log.get("description"))
             return None
 
-    async def _lifetime_stats(
-        self, user_id: Optional[str], cache: dict[str, Optional[dict]]
+    async def _contest_stats(
+        self, user_id: Optional[str], contest: dict, cache: dict[str, Optional[dict]]
     ) -> Optional[dict]:
-        """Return ``{characters, pages, comic_pages, minutes}`` for a user, or ``None``.
+        """Return ``{characters, pages, comic_pages, minutes}`` for a user's logs in
+        ``contest``, or ``None``.
 
         ``None`` when the id is missing or tadoku.app can't be reached. Results
         (including misses) are memoised in ``cache`` so a burst from one person
@@ -379,39 +393,46 @@ class LogFeed(commands.Cog):
         if user_id in cache:
             return cache[user_id]
         try:
-            stats = await self._compute_lifetime(user_id)
+            stats = await self._compute_contest_totals(user_id, contest)
         except tadoku.TadokuAPIError:
-            _log.warning("Log feed: lifetime lookup for user %s failed", user_id)
+            _log.warning("Log feed: contest-stats lookup for user %s failed", user_id)
             stats = None
         cache[user_id] = stats
         return stats
 
-    async def _compute_lifetime(self, user_id: str) -> dict:
-        """Sum a user's logs since ``LIFETIME_START`` into characters / pages /
-        comic pages / listening minutes.
+    async def _compute_contest_totals(self, user_id: str, contest: dict) -> dict:
+        """Sum a user's logs within ``contest``'s date window into characters /
+        pages / comic pages / listening minutes.
 
         Buckets each non-deleted log by its unit: "character" -> characters,
         "comic" ("Comic page") -> comic_pages, "page" ("Page") -> pages, and
         "minute" ("Minute"/"Dense minute") -> listening minutes. ``comic`` is
         checked before ``page`` since "Comic page" contains "page". Logs arrive
-        newest-first, so the first one before ``LIFETIME_START`` ends the walk
-        (everything older is out of window). Pages the API by ``total_size``,
-        bounded by ``LIFETIME_MAX_PAGES``.
+        newest-first: any log newer than the contest window is skipped, and the
+        first one older than it ends the walk (everything before it is out of
+        window too). Pages the API by ``total_size``, bounded by
+        ``CONTEST_LOG_MAX_PAGES``.
         """
+        start, end = _contest_window(contest)
         characters = pages = comic_pages = minutes = 0.0
 
         def _totals():
             return {"characters": characters, "pages": pages,
                     "comic_pages": comic_pages, "minutes": minutes}
 
-        for page in range(LIFETIME_MAX_PAGES):
+        for page in range(CONTEST_LOG_MAX_PAGES):
             data = await tadoku.list_user_logs(
                 self.bot.session, user_id, page=page, page_size=LOG_PAGE_SIZE
             )
             logs = data.get("logs", [])
             for log in logs:
-                # Newest-first: a log before the window means we're done entirely.
-                if leaderboard._parse_timestamp(log["created_at"]) < LIFETIME_START:
+                ts = leaderboard._parse_timestamp(log["created_at"])
+                # Newest-first: logs after the contest aren't counted (but older
+                # ones may still lie inside the window, so keep scanning)...
+                if ts >= end:
+                    continue
+                # ...and the first log before the window ends the walk entirely.
+                if ts < start:
                     return _totals()
                 if log.get("deleted"):
                     continue
