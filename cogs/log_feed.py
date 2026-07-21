@@ -136,15 +136,34 @@ def _youtube_urls(log: dict) -> list[str]:
     return _URL_RE.findall(log.get("description") or "")
 
 
+def _format_tags(log: dict) -> str:
+    """The log's tags as hashtag tokens ("#fiction #game"), or "" if it has none.
+
+    Keeps the order the logger picked them in and de-dupes case-insensitively, so
+    the tags read on the card the way they were entered on tadoku.app.
+    """
+    seen: set[str] = set()
+    tokens = []
+    for tag in (log.get("tags") or []):
+        text = str(tag).strip()
+        key = text.lower()
+        if text and key not in seen:
+            seen.add(key)
+            tokens.append(f"#{text}")
+    return " ".join(tokens)
+
+
 def _this_log_line(log: dict) -> str:
-    """The one-line "what they just logged" for the profile card's callout:
-    activity, amount + unit, and points (no language -- it lives off the card)."""
+    """The one-line "what they just logged" for the profile card's callout: the
+    logger's tags, then activity, amount + unit, and points (no language -- it
+    lives off the card)."""
     activity = _activity_name(log)
     amount = _format_points(log.get("amount", 0))
     unit = log.get("unit_name", "")
     points = _format_points(log.get("score", 0))
     what = f"{amount} {unit}".strip()
-    parts = [p for p in (activity, what) if p]
+    tags = _format_tags(log)
+    parts = [p for p in (tags, activity, what) if p]
     parts.append(f"+{points} pts")
     return "  ·  ".join(parts)
 

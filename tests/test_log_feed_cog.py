@@ -141,6 +141,25 @@ def test_this_log_line_has_activity_amount_points_no_language():
     assert "Japanese" not in line  # language deliberately dropped from the card
 
 
+def test_this_log_line_shows_tags_before_the_activity():
+    line = log_feed._this_log_line(_log(CUTOFF, activity="Reading", amount=192, unit="Page",
+                                        score=192, tags=["fiction", "game"]))
+    assert line.startswith("#fiction #game")
+    assert line.index("#fiction") < line.index("Reading")
+
+
+def test_this_log_line_dedupes_tags_case_insensitively_and_keeps_order():
+    line = log_feed._this_log_line(_log(CUTOFF, activity="Reading", tags=["Manga", "manga", "book"]))
+    assert line.startswith("#Manga #book  ·  Reading")
+
+
+def test_this_log_line_without_tags_is_unchanged():
+    line = log_feed._this_log_line(_log(CUTOFF, activity="Listening", amount=30, unit="Minute",
+                                        score=30, tags=None))
+    assert line.startswith("Listening")
+    assert "#" not in line
+
+
 # ---------------------------------------------------------------------------
 # _youtube_urls
 # ---------------------------------------------------------------------------
