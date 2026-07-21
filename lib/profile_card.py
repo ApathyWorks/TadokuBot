@@ -245,10 +245,13 @@ def _render(
     content_x = av_x + av_size + MARGIN * S
     right = (WIDTH - MARGIN) * S
 
-    # Header: name + subtitle.
+    # Header: name + subtitle (the subtitle can carry a long contest title, so it
+    # is trimmed to the content width).
     draw.text((content_x, 44 * S), display_name, font=_font(46 * S, bold=True), fill=INK)
     if subtitle:
-        draw.text((content_x, 104 * S), subtitle, font=_font(22 * S), fill=INK_SOFT)
+        subtitle_font = _font(22 * S)
+        draw.text((content_x, 104 * S), _truncate(draw, subtitle, subtitle_font, right - content_x),
+                  font=subtitle_font, fill=INK_SOFT)
 
     # Stat row: Characters | Pages | Comic pages | Listening.
     stats = [

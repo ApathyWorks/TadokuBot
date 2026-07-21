@@ -8,9 +8,10 @@ the card carries their Discord avatar.
 
 If the logger has linked their Discord account via ``/claim``, the log posts as a
 rendered image **profile card** (see ``lib.profile_card``): their Discord avatar,
-their immersion stats since the start of 2026 (characters, pages, listening hours
-— summed live from tadoku.app's per-user log history), and this log. Everyone
-else gets the plain embed card.
+their place and score in the current contest (as the card's subtitle), their
+immersion stats since the start of 2026 (characters, pages, listening hours —
+summed live from tadoku.app's per-user log history), and this log. Everyone else
+gets the plain embed card.
 
 A ``youtube``-tagged log whose description contains URL(s) also gets them posted
 as a follow-up message beneath the card, so Discord renders a playable preview
@@ -245,9 +246,11 @@ class LogFeed(commands.Cog):
         avatar_cache: dict[int, Optional[bytes]] = {}
         lifetime_cache: dict[str, Optional[dict]] = {}
         poster_cache: dict[tuple, Optional[bytes]] = {}
+        standing_cache: dict[str, str] = {}
         for log in to_post:
             message = await self._message_for(
-                log, claims, avatar_cache, lifetime_cache, poster_cache
+                log, contest, claims, avatar_cache, lifetime_cache,
+                poster_cache, standing_cache,
             )
             await self._post(settings["channel_id"], **message)
             # For a YouTube log, drop the video link(s) under the card in one
@@ -266,18 +269,21 @@ class LogFeed(commands.Cog):
     async def _message_for(
         self,
         log: dict,
+        contest: dict,
         claims: dict[str, str],
         avatar_cache: dict[int, Optional[bytes]],
         lifetime_cache: dict[str, Optional[dict]],
         poster_cache: dict[tuple, Optional[bytes]],
+        standing_cache: dict[str, str],
     ) -> dict:
         """Build the ``send`` kwargs for one log.
 
         A claimed logger whose lifetime stats we can fetch gets the rendered image
         profile card (``file=``) -- the material title is drawn on the card itself,
-        and when the log is tagged with a media type we recognise (anime/manga/
-        game/book) its cover is drawn on the right. Everyone else -- and a claimed
-        logger whose lifetime lookup fails -- gets the plain embed card.
+        the card's subtitle shows their place and score in ``contest``, and when
+        the log is tagged with a media type we recognise (anime/manga/game/book)
+        its cover is drawn on the right. Everyone else -- and a claimed logger whose
+        lifetime lookup fails -- gets the plain embed card.
         """
         name = (log.get("user_display_name") or "Someone").strip()
         claimer = _claimer_id(claims, name)
@@ -286,10 +292,11 @@ class LogFeed(commands.Cog):
             if lifetime is not None:
                 avatar_bytes = await self._avatar_bytes_for_id(claimer, avatar_cache)
                 poster_bytes = await self._poster_bytes_for(log, poster_cache)
+                subtitle = await self._contest_standing(contest, name, standing_cache)
                 try:
                     png = await profile_card.render_card(
                         display_name=name,
-                        subtitle="Immersion since 2026",
+                        subtitle=subtitle,
                         avatar_bytes=avatar_bytes,
                         characters=lifetime["characters"],
                         pages=lifetime["pages"],
@@ -307,6 +314,39 @@ class LogFeed(commands.Cog):
                     _log.exception("Log feed: profile card render failed for %r; using embed", name)
 
         return {"embed": _format_log_embed(log)}
+
+    async def _contest_standing(
+        self, contest: dict, display_name: str, cache: dict[str, str]
+    ) -> str:
+        """Return the card subtitle: the logger's place and score in ``contest``.
+
+        Looks ``display_name`` up on the contest's cumulative leaderboard and
+        renders it as e.g. ``"#5 · 320.5 pts in 2026 Round 4"`` (with a "(tie)"
+        marker when the rank is shared). Returns "" when they aren't on the
+        leaderboard yet or tadoku.app can't be reached, so a missing standing just
+        drops the subtitle rather than failing the card. Memoised per display name
+        across a burst via ``cache``.
+        """
+        key = leaderboard._normalize_name(display_name)
+        if key in cache:
+            return cache[key]
+        try:
+            entry = await leaderboard._find_leaderboard_entry(
+                self.bot, contest["id"], display_name
+            )
+        except tadoku.TadokuAPIError:
+            _log.warning("Log feed: leaderboard lookup for %r failed", display_name)
+            entry = None
+        if entry is None:
+            standing = ""
+        else:
+            tie = " (tie)" if entry.get("is_tie") else ""
+            standing = (
+                f"#{entry['rank']}{tie} · {_format_points(entry['score'])} pts "
+                f"in {contest['title']}"
+            )
+        cache[key] = standing
+        return standing
 
     async def _poster_bytes_for(
         self, log: dict, cache: dict[tuple, Optional[bytes]]

@@ -34,6 +34,12 @@ def patched(monkeypatch):
     monkeypatch.setattr(
         tadoku_client, "list_user_logs", AsyncMock(return_value={"logs": [], "total_size": 0})
     )
+    # Contest leaderboard drives the card subtitle (place + score); empty by
+    # default so a claimed logger who isn't ranked just gets a blank subtitle.
+    monkeypatch.setattr(
+        tadoku_client, "get_contest_leaderboard",
+        AsyncMock(return_value={"entries": [], "total_size": 0}),
+    )
     # Stub the (Pillow) image renderer so poll tests don't render real PNGs; the
     # renderer itself is covered in test_profile_card.py.
     monkeypatch.setattr(profile_card, "render_card", AsyncMock(return_value=b"PNGDATA"))
@@ -333,6 +339,44 @@ async def test_poll_renders_image_card_for_claimed_logger():
     assert "Reading" in kwargs["this_log"] and "192 Page" in kwargs["this_log"]
     # And it summed the right user's history.
     assert tadoku_client.list_user_logs.await_args.args[1] == "uuid-ruby"
+
+
+async def test_poll_card_subtitle_shows_contest_place_and_score():
+    channel = _channel(cid=555)
+    bot = _bot_with_channel(channel)
+    bot.get_user = lambda uid: _user_with_avatar() if uid == 111 else None
+    config_store.set_guild_logfeed(999, enabled=True, channel_id=555, last_seen=CUTOFF)
+    config_store.set_claim(999, 111, "ruby")
+    tadoku_client.list_contest_logs.side_effect = _pager({0: [
+        _log("2026-07-05T21:00:00Z", name="Ruby ", user_id="u"),
+    ]})
+    # The logger sits 5th on the current contest's leaderboard with 320.5 points.
+    tadoku_client.get_contest_leaderboard.return_value = {
+        "entries": [{"rank": 5, "user_display_name": "ruby", "score": 320.5, "is_tie": False}],
+        "total_size": 1,
+    }
+    cog = log_feed.LogFeed(bot)
+
+    await cog._poll_guild(999)
+
+    assert profile_card.render_card.await_args.kwargs["subtitle"] == "#5 · 320.5 pts in 2026 Round 4"
+
+
+async def test_poll_card_subtitle_blank_when_logger_not_on_leaderboard():
+    channel = _channel(cid=555)
+    bot = _bot_with_channel(channel)
+    bot.get_user = lambda uid: _user_with_avatar() if uid == 111 else None
+    config_store.set_guild_logfeed(999, enabled=True, channel_id=555, last_seen=CUTOFF)
+    config_store.set_claim(999, 111, "ruby")
+    tadoku_client.list_contest_logs.side_effect = _pager({0: [
+        _log("2026-07-05T21:00:00Z", name="ruby", user_id="u"),
+    ]})
+    # Default fixture leaderboard is empty -> no entry -> blank subtitle.
+    cog = log_feed.LogFeed(bot)
+
+    await cog._poll_guild(999)
+
+    assert profile_card.render_card.await_args.kwargs["subtitle"] == ""
 
 
 async def test_poll_card_draws_the_material_title_on_the_card():
