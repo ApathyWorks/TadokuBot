@@ -545,7 +545,7 @@ async def test_weekly_command_renders_ranked_card(fake_bot):
     # Posted as a rendered image, not an embed.
     assert isinstance(interaction.followup.send.await_args.kwargs["file"], discord.File)
     card = _rendered_card()
-    assert "last 7 days" in card.title
+    assert card.title == "2026 Round 4" and card.subtitle == "last 7 days"
     ranked = [(e["rank"], e["name"], e["score"]) for e in card.entries]
     assert ranked[:3] == [(1, "ruby", 30.0), (2, "anja", 20.0), (3, "ryun", 10.0)]
     assert "3 of 3" in card.footer
@@ -721,7 +721,7 @@ async def test_weekly_command_still_renders_when_shame_lookup_fails(fake_bot):
 
     # The main ranking (from logs) still went out; only the shame section is skipped.
     card = _rendered_card()
-    assert "last 7 days" in card.title
+    assert "last 7 days" in card.subtitle
     assert card.note_body is None
 
 
@@ -786,7 +786,7 @@ async def test_monthly_command_uses_explicit_month_and_year(fake_bot, monkeypatc
     assert captured["cutoff"] == datetime(2026, 6, 1, tzinfo=timezone.utc)
     assert captured["until"] == datetime(2026, 7, 1, tzinfo=timezone.utc)
     card = _rendered_card()
-    assert "June 2026" in card.title
+    assert "June 2026" in card.subtitle
     assert "June 2026" in card.footer
 
 
@@ -838,7 +838,7 @@ async def test_monthly_command_renders_ranked_embed(fake_bot):
 
     card = _rendered_card()
     month_label = datetime.now(timezone.utc).strftime("%B %Y")
-    assert month_label in card.title
+    assert month_label in card.subtitle
     ranked = [(e["rank"], e["name"], e["score"]) for e in card.entries]
     assert ranked[:3] == [(1, "ruby", 30.0), (2, "anja", 20.0), (3, "ryun", 10.0)]
     assert "3 of 3" in card.footer
@@ -919,7 +919,7 @@ async def test_yearend_card_renders_standings_with_podium_congrats(fake_bot):
     contest, card = await leaderboard_cog.build_yearend_card(fake_bot, guild_id=999)
 
     assert contest == LATEST_OFFICIAL
-    assert "Final Standings" in card.title
+    assert card.title == "2026 Round 4" and card.subtitle == "Final Standings"
     assert card.accent == "gold"
     # Full standings in the ranked entries.
     names = [e["name"] for e in card.entries]

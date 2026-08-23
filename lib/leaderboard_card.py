@@ -64,13 +64,16 @@ class LeaderboardCard:
 
     ``entries`` are dicts of ``rank``/``name``/``score``/``is_tie`` and an optional
     ``avatar`` (Discord avatar bytes, or ``None`` for a placeholder disc).
-    ``note_title`` + ``note_body`` are an optional call-out block (the weekly shame
-    list, or the year-end congratulations). ``accent`` picks the left-stripe
-    colour: ``"purple"`` (period rankings) or ``"gold"`` (year-end final standings).
+    ``subtitle`` is the scope shown on its own line under the ``title`` (contest
+    name) -- e.g. "last 7 days", "June 2026", "Final Standings". ``note_title`` +
+    ``note_body`` are an optional call-out block (the weekly shame list, or the
+    year-end congratulations). ``accent`` picks the left-stripe colour: ``"purple"``
+    (period rankings) or ``"gold"`` (year-end final standings).
     """
     title: str
     entries: list[dict]
     footer: str
+    subtitle: Optional[str] = None
     note_title: Optional[str] = None
     note_body: Optional[str] = None
     accent: str = "purple"
@@ -101,6 +104,7 @@ def _render(card: LeaderboardCard) -> bytes:
 
     # Fonts (scaled). Top-three rows use the bigger name/score type.
     title_font = _font(34 * S, bold=True)
+    subtitle_font = _font(22 * S)
     top_name_font = _font(29 * S, bold=True)
     top_score_font = _font(29 * S, bold=True)
     row_name_font = _font(23 * S)
@@ -116,8 +120,10 @@ def _render(card: LeaderboardCard) -> bytes:
     measure = ImageDraw.Draw(Image.new("RGB", (1, 1)))
 
     # -- layout pass: place every row, then the note box, then the footer, so the
-    # canvas height can grow to fit exactly. --
-    y = MARGIN + 46  # below the title + a little breathing room for the divider
+    # canvas height can grow to fit exactly. The header (title, optional scope
+    # subtitle, divider) takes more vertical room when a subtitle is shown. --
+    divider_y = MARGIN + (78 if card.subtitle else 40)
+    y = divider_y + 6  # rows start just below the divider
     rows = []  # (entry, y0, row_h, is_top)
     for entry in card.entries:
         is_top = entry["rank"] <= 3
@@ -152,10 +158,14 @@ def _render(card: LeaderboardCard) -> bytes:
     draw.rounded_rectangle((0, 0, 10 * S, total_h * S - 1), radius=10 * S, fill=accent)
     draw.rectangle((6 * S, 0, 12 * S, total_h * S - 1), fill=accent)
 
-    # Title + a hairline divider beneath it.
+    # Header: the contest name, the scope on its own line beneath it, then a
+    # hairline divider under both.
     draw.text((content_x * S, MARGIN * S), _truncate(draw, _oneline(card.title), title_font,
               (right - content_x) * S), font=title_font, fill=INK, anchor="la")
-    draw.line((content_x * S, (MARGIN + 40) * S, right * S, (MARGIN + 40) * S), fill=HAIRLINE, width=S)
+    if card.subtitle:
+        draw.text((content_x * S, (MARGIN + 46) * S), _truncate(draw, _oneline(card.subtitle),
+                  subtitle_font, (right - content_x) * S), font=subtitle_font, fill=INK_SOFT, anchor="la")
+    draw.line((content_x * S, divider_y * S, right * S, divider_y * S), fill=HAIRLINE, width=S)
 
     avatar_cx = content_x + BADGE_W + AV_GAP + AV_COL / 2
     name_x = content_x + BADGE_W + AV_GAP + AV_COL + AV_GAP

@@ -372,7 +372,8 @@ async def build_yearend_card(
     card_entries = [_card_entry(entry) for entry in entries]
     await _attach_avatars(bot, guild_id, card_entries)
     card = leaderboard_card.LeaderboardCard(
-        title=f"{contest['title']} — Final Standings",
+        title=contest["title"],
+        subtitle="Final Standings",
         entries=card_entries,
         footer=f"{data.get('total_size', len(entries))} participants",
         note_body=(
@@ -436,7 +437,8 @@ async def build_period_leaderboard_card(
     card_entries = [_card_entry(entry) for entry in ranked[:PAGE_SIZE]]
     await _attach_avatars(bot, guild_id, card_entries)
     card = leaderboard_card.LeaderboardCard(
-        title=f"{contest['title']} — {title_suffix}",
+        title=contest["title"],
+        subtitle=title_suffix,
         entries=card_entries,
         footer=f"Top {shown} of {len(ranked)} · points logged in {window_phrase}",
         note_title=note_title,
