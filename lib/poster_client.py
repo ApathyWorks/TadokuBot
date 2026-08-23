@@ -94,8 +94,12 @@ def clean_title(description: str) -> str:
     # Drop parenthetical / bracketed notes: (finished), 【...】, [...], （...）.
     t = re.sub(r"[\(（【\[].*?[\)）】\]]", " ", t)
     t = re.sub(r"[\(（【\[].*$", " ", t)  # unbalanced trailing "(finished"
-    # Cut at a Latin volume/episode/chapter marker and everything after it.
-    t = re.sub(r"(?i)\b(?:vol\.?|volume|ep\.?|episode|chapter|ch\.?|#)\s*[\d０-９].*$", "", t)
+    # Cut at a Latin volume/season/episode/chapter marker and everything after it.
+    t = re.sub(
+        r"(?i)\b(?:(?:vol\.?|volume|ep\.?|episode|chapter|ch\.?|#)\s*[\d０-９]|s[\d０-９]+e[\d０-９]+).*$",
+        "",
+        t,
+    )
     # Cut at a CJK volume/episode counter: 第N話 / N巻 / N話 / N章 / N集 / N冊.
     t = re.sub(r"第?\s*[\d０-９]+\s*(?:話|巻|章|集|冊).*$", "", t)
     # Cut a trailing bare number or number-range (14, 002, 73〜83, 1-2).
