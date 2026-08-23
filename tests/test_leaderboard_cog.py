@@ -11,11 +11,13 @@ by calling their ``.callback(...)`` directly with a fake interaction.
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock
 
+import discord
 import pytest
 from discord.app_commands import Choice
 
 import cogs.leaderboard as leaderboard_cog
 import lib.config_store as config_store
+import lib.leaderboard_card as leaderboard_card
 import lib.tadoku_client as tadoku_client
 from tests.conftest import make_interaction
 
@@ -44,7 +46,15 @@ def patched_tadoku(monkeypatch):
         AsyncMock(return_value={"entries": [], "total_size": 0}),
     )
     monkeypatch.setattr(tadoku_client, "list_contest_logs", AsyncMock(return_value=[]))
+    # Stub the (Pillow) card renderer so cog tests assert on the card model passed
+    # to it, not on real PNG bytes; the renderer is covered in test_leaderboard_card.py.
+    monkeypatch.setattr(leaderboard_card, "render", AsyncMock(return_value=b"PNGDATA"))
     return tadoku_client
+
+
+def _rendered_card():
+    """The LeaderboardCard the cog handed to the (mocked) renderer."""
+    return leaderboard_card.render.await_args.args[0]
 
 
 # ---------------------------------------------------------------------------
@@ -523,7 +533,7 @@ async def test_weekly_command_defers(fake_bot):
     interaction.response.defer.assert_awaited_once()
 
 
-async def test_weekly_command_renders_ranked_embed(fake_bot):
+async def test_weekly_command_renders_ranked_card(fake_bot):
     tadoku_client.list_contest_logs.side_effect = _log_pager({0: _recent_logs(
         ("u1", "ruby", 30), ("u2", "ryun", 10), ("u3", "anja", 20),
     )})
@@ -532,13 +542,14 @@ async def test_weekly_command_renders_ranked_embed(fake_bot):
 
     await cog.weeklyleaderboard.callback(cog, interaction)
 
-    embed = interaction.followup.send.await_args.kwargs["embed"]
-    assert "last 7 days" in embed.title
-    lines = embed.description.split("\n")
-    assert lines[0] == "🥇 ruby — 30.0"   # highest weekly total
-    assert lines[1] == "🥈 anja — 20.0"
-    assert lines[2] == "🥉 ryun — 10.0"
-    assert "3 of 3" in embed.footer.text
+    # Posted as a rendered image, not an embed.
+    assert isinstance(interaction.followup.send.await_args.kwargs["file"], discord.File)
+    card = _rendered_card()
+    assert "last 7 days" in card.title
+    ranked = [(e["rank"], e["name"], e["score"]) for e in card.entries]
+    assert ranked[:3] == [(1, "ruby", 30.0), (2, "anja", 20.0), (3, "ryun", 10.0)]
+    assert "3 of 3" in card.footer
+    assert card.accent == "purple"
 
 
 async def test_weekly_command_reports_empty_window(fake_bot):
@@ -576,8 +587,7 @@ async def test_weekly_command_uses_configured_contest(fake_bot):
 
     called_contest_id = tadoku_client.list_contest_logs.await_args.args[1]
     assert called_contest_id == "configured-id"
-    embed = interaction.followup.send.await_args.kwargs["embed"]
-    assert "Configured Contest" in embed.title
+    assert "Configured Contest" in _rendered_card().title
 
 
 # ---------------------------------------------------------------------------
@@ -667,11 +677,10 @@ async def test_weekly_command_appends_shame_field_for_slackers(fake_bot):
 
     await cog.weeklyleaderboard.callback(cog, interaction)
 
-    embed = interaction.followup.send.await_args.kwargs["embed"]
-    shame_fields = [f for f in embed.fields if "Shame" in f.name]
-    assert shame_fields
-    assert "slacker" in shame_fields[0].value
-    assert "ruby" not in shame_fields[0].value
+    card = _rendered_card()
+    assert "Shame" in card.note_title
+    assert "slacker" in card.note_body
+    assert "ruby" not in card.note_body
 
 
 async def test_weekly_command_omits_shame_field_when_disabled(fake_bot):
@@ -686,8 +695,7 @@ async def test_weekly_command_omits_shame_field_when_disabled(fake_bot):
 
     await cog.weeklyleaderboard.callback(cog, interaction)
 
-    embed = interaction.followup.send.await_args.kwargs["embed"]
-    assert embed.fields == []
+    assert _rendered_card().note_body is None
     # With shame off we don't even fetch the cumulative leaderboard.
     tadoku_client.get_contest_leaderboard.assert_not_called()
 
@@ -700,8 +708,7 @@ async def test_weekly_command_omits_shame_field_when_no_slackers(fake_bot):
 
     await cog.weeklyleaderboard.callback(cog, interaction)
 
-    embed = interaction.followup.send.await_args.kwargs["embed"]
-    assert embed.fields == []
+    assert _rendered_card().note_body is None
 
 
 async def test_weekly_command_still_renders_when_shame_lookup_fails(fake_bot):
@@ -713,9 +720,9 @@ async def test_weekly_command_still_renders_when_shame_lookup_fails(fake_bot):
     await cog.weeklyleaderboard.callback(cog, interaction)
 
     # The main ranking (from logs) still went out; only the shame section is skipped.
-    embed = interaction.followup.send.await_args.kwargs["embed"]
-    assert "last 7 days" in embed.title
-    assert embed.fields == []
+    card = _rendered_card()
+    assert "last 7 days" in card.title
+    assert card.note_body is None
 
 
 # ---------------------------------------------------------------------------
@@ -778,9 +785,9 @@ async def test_monthly_command_uses_explicit_month_and_year(fake_bot, monkeypatc
 
     assert captured["cutoff"] == datetime(2026, 6, 1, tzinfo=timezone.utc)
     assert captured["until"] == datetime(2026, 7, 1, tzinfo=timezone.utc)
-    embed = interaction.followup.send.await_args.kwargs["embed"]
-    assert "June 2026" in embed.title
-    assert "June 2026" in embed.footer.text
+    card = _rendered_card()
+    assert "June 2026" in card.title
+    assert "June 2026" in card.footer
 
 
 async def test_monthly_command_defaults_year_to_current_when_only_month_given(fake_bot, monkeypatch):
@@ -829,15 +836,13 @@ async def test_monthly_command_renders_ranked_embed(fake_bot):
 
     await cog.monthlyleaderboard.callback(cog, interaction)
 
-    embed = interaction.followup.send.await_args.kwargs["embed"]
+    card = _rendered_card()
     month_label = datetime.now(timezone.utc).strftime("%B %Y")
-    assert month_label in embed.title
-    lines = embed.description.split("\n")
-    assert lines[0] == "🥇 ruby — 30.0"   # highest monthly total
-    assert lines[1] == "🥈 anja — 20.0"
-    assert lines[2] == "🥉 ryun — 10.0"
-    assert "3 of 3" in embed.footer.text
-    assert month_label in embed.footer.text
+    assert month_label in card.title
+    ranked = [(e["rank"], e["name"], e["score"]) for e in card.entries]
+    assert ranked[:3] == [(1, "ruby", 30.0), (2, "anja", 20.0), (3, "ryun", 10.0)]
+    assert "3 of 3" in card.footer
+    assert month_label in card.footer
 
 
 async def test_monthly_command_reports_empty_window(fake_bot):
@@ -864,11 +869,10 @@ async def test_monthly_command_appends_shame_field_for_slackers(fake_bot):
 
     await cog.monthlyleaderboard.callback(cog, interaction)
 
-    embed = interaction.followup.send.await_args.kwargs["embed"]
-    shame_fields = [f for f in embed.fields if "Shame" in f.name]
-    assert shame_fields
-    assert "slacker" in shame_fields[0].value
-    assert "ruby" not in shame_fields[0].value
+    card = _rendered_card()
+    assert "Shame" in card.note_title
+    assert "slacker" in card.note_body
+    assert "ruby" not in card.note_body
 
 
 async def test_monthly_command_uses_same_shame_toggle_as_weekly(fake_bot):
@@ -885,8 +889,7 @@ async def test_monthly_command_uses_same_shame_toggle_as_weekly(fake_bot):
 
     await cog.monthlyleaderboard.callback(cog, interaction)
 
-    embed = interaction.followup.send.await_args.kwargs["embed"]
-    assert embed.fields == []
+    assert _rendered_card().note_body is None
     tadoku_client.get_contest_leaderboard.assert_not_called()
 
 
@@ -900,63 +903,62 @@ async def test_monthly_command_uses_configured_contest(fake_bot):
 
     called_contest_id = tadoku_client.list_contest_logs.await_args.args[1]
     assert called_contest_id == "configured-id"
-    embed = interaction.followup.send.await_args.kwargs["embed"]
-    assert "Configured Contest" in embed.title
+    assert "Configured Contest" in _rendered_card().title
 
 
 # ---------------------------------------------------------------------------
-# build_yearend_embed (the year-end alert's cumulative recap)
+# build_yearend_card (the year-end alert's cumulative recap)
 # ---------------------------------------------------------------------------
 
-async def test_yearend_embed_renders_standings_with_podium_congrats(fake_bot):
+async def test_yearend_card_renders_standings_with_podium_congrats(fake_bot):
     tadoku_client.get_contest_leaderboard.return_value = {
         "entries": [_entry(1, "ruby", 100.0), _entry(2, "ryun", 90.0), _entry(3, "anja", 80.0)],
         "total_size": 3,
     }
 
-    contest, embed = await leaderboard_cog.build_yearend_embed(fake_bot, guild_id=999)
+    contest, card = await leaderboard_cog.build_yearend_card(fake_bot, guild_id=999)
 
     assert contest == LATEST_OFFICIAL
-    assert "Final Standings" in embed.title
-    # Full standings in the description.
-    assert "ruby" in embed.description and "ryun" in embed.description and "anja" in embed.description
-    # Top-3 podium named in the congratulation field.
-    field_text = embed.fields[0].value
-    assert "ruby" in field_text and "ryun" in field_text and "anja" in field_text
-    assert "next year" in field_text.lower()
-    assert "3 participants" in embed.footer.text
+    assert "Final Standings" in card.title
+    assert card.accent == "gold"
+    # Full standings in the ranked entries.
+    names = [e["name"] for e in card.entries]
+    assert names == ["ruby", "ryun", "anja"]
+    # Top-3 podium named in the congratulations note.
+    assert "ruby" in card.note_body and "ryun" in card.note_body and "anja" in card.note_body
+    assert "next year" in card.note_body.lower()
+    assert "3 participants" in card.footer
 
 
-async def test_yearend_embed_none_when_no_entries(fake_bot):
+async def test_yearend_card_none_when_no_entries(fake_bot):
     tadoku_client.get_contest_leaderboard.return_value = {"entries": [], "total_size": 0}
 
-    contest, embed = await leaderboard_cog.build_yearend_embed(fake_bot, guild_id=999)
+    contest, card = await leaderboard_cog.build_yearend_card(fake_bot, guild_id=999)
 
     assert contest == LATEST_OFFICIAL
-    assert embed is None
+    assert card is None
 
 
-async def test_yearend_embed_handles_fewer_than_three_participants(fake_bot):
+async def test_yearend_card_handles_fewer_than_three_participants(fake_bot):
     tadoku_client.get_contest_leaderboard.return_value = {
         "entries": [_entry(1, "solo", 5.0)],
         "total_size": 1,
     }
 
-    _contest, embed = await leaderboard_cog.build_yearend_embed(fake_bot, guild_id=999)
+    _contest, card = await leaderboard_cog.build_yearend_card(fake_bot, guild_id=999)
 
-    field_text = embed.fields[0].value
-    assert "solo" in field_text
-    assert "next year" in field_text.lower()
+    assert "solo" in card.note_body
+    assert "next year" in card.note_body.lower()
 
 
-async def test_yearend_embed_uses_configured_contest(fake_bot):
+async def test_yearend_card_uses_configured_contest(fake_bot):
     config_store.set_guild_contest(999, "configured-id", "Configured Contest")
     tadoku_client.get_contest_leaderboard.return_value = {
         "entries": [_entry(1, "ruby", 100.0)],
         "total_size": 1,
     }
 
-    contest, embed = await leaderboard_cog.build_yearend_embed(fake_bot, guild_id=999)
+    contest, card = await leaderboard_cog.build_yearend_card(fake_bot, guild_id=999)
 
     assert contest == CONFIGURED_CONTEST
-    assert "Configured Contest" in embed.title
+    assert "Configured Contest" in card.title

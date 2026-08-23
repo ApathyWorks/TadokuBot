@@ -9,14 +9,15 @@ together and picks the single channel they post to:
     congratulation, on Jan 1.
 
 A background loop (``check_alerts``) runs hourly: for every guild with alerts
-enabled, once a calendar period rolls over it renders the embed for that kind
-(weekly/monthly via ``build_period_leaderboard_embed``; yearly via
-``build_yearend_embed``) and posts it to the configured channel. A per-guild,
-per-kind ``last_period`` marker makes each alert fire exactly once per period and
-survive restarts (it catches up on the next tick if the bot was down when the
-period rolled over).
+enabled, once a calendar period rolls over it renders the leaderboard card for
+that kind (weekly/monthly via ``build_period_leaderboard_card``; yearly via
+``build_yearend_card``) and posts the image to the configured channel. A
+per-guild, per-kind ``last_period`` marker makes each alert fire exactly once per
+period and survive restarts (it catches up on the next tick if the bot was down
+when the period rolled over).
 """
 
+import io
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -27,6 +28,7 @@ from discord.ext import commands, tasks
 
 import cogs.leaderboard as leaderboard
 import lib.config_store as config_store
+import lib.leaderboard_card as leaderboard_card
 import lib.tadoku_client as tadoku
 from lib.permissions import is_admin
 
@@ -139,10 +141,10 @@ class Alerts(commands.Cog):
             if kind == "yearly":
                 # Year-end shows the contest's cumulative standings (like
                 # /leaderboard) plus a podium congratulation -- not a windowed tally.
-                _contest, embed = await leaderboard.build_yearend_embed(self.bot, guild_id)
+                _contest, card = await leaderboard.build_yearend_card(self.bot, guild_id)
             else:
                 cutoff, until, title_suffix, window_phrase = _window_for(kind, now)
-                _contest, embed = await leaderboard.build_period_leaderboard_embed(
+                _contest, card = await leaderboard.build_period_leaderboard_card(
                     self.bot,
                     guild_id,
                     cutoff=cutoff,
@@ -157,14 +159,16 @@ class Alerts(commands.Cog):
             )
             return
 
-        if embed is not None:
-            await self._post(guild_id, settings["channel_id"], embed)
+        if card is not None:
+            png = await leaderboard_card.render(card)
+            await self._post(guild_id, settings["channel_id"], png)
         # Advance the marker whether we posted or there was simply nothing to
         # post, so an empty period doesn't get re-checked every hour.
         config_store.set_guild_alert(guild_id, kind, last_period=period)
 
-    async def _post(self, guild_id: int, channel_id: Optional[int], embed: discord.Embed) -> None:
-        """Send ``embed`` to the configured channel, tolerating a missing channel.
+    async def _post(self, guild_id: int, channel_id: Optional[int], png: bytes) -> None:
+        """Send the rendered card ``png`` to the configured channel, tolerating a
+        missing channel.
 
         A channel that's been deleted or that the bot can no longer see/post to
         is logged and skipped rather than raised -- the wrap-up for that period
@@ -180,7 +184,7 @@ class Alerts(commands.Cog):
                 _log.warning("Wrap-up for guild %s: channel %s not found", guild_id, channel_id)
                 return
         try:
-            await channel.send(embed=embed)
+            await channel.send(file=discord.File(io.BytesIO(png), filename="leaderboard.png"))
         except discord.HTTPException:
             _log.warning(
                 "Wrap-up for guild %s: couldn't post to channel %s", guild_id, channel_id

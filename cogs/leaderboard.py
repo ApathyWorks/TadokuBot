@@ -2,11 +2,14 @@
 ``/monthlyleaderboard`` commands.
 
 They all resolve which contest this server should show (a pinned one, or the
-latest official as a fallback) and render results as Discord embeds with medal
-emoji for the top three. ``/leaderboard`` reads the contest's cumulative
-ranking; ``/weeklyleaderboard`` and ``/monthlyleaderboard`` instead
-tally raw logs over a window (the last 7 days, or the current calendar month) to
-build the rolling/period rankings the API doesn't expose directly.
+latest official as a fallback). ``/leaderboard`` reads the contest's cumulative
+ranking and renders it as a Discord embed; ``/weeklyleaderboard`` and
+``/monthlyleaderboard`` instead tally raw logs over a window (the last 7 days, or
+the current calendar month) to build the rolling/period rankings the API doesn't
+expose directly, and render them as **image cards** (``lib.leaderboard_card``)
+where the top three are drawn larger with medal badges. ``build_*_card`` assemble
+the card model (shared with the scheduled alerts in ``cogs.alerts``, which also
+render the year-end recap this way).
 
 When a server has the shame setting on (the default; toggled via ``/shame``),
 ``/weeklyleaderboard`` and ``/monthlyleaderboard`` also append a "shame"
@@ -14,6 +17,7 @@ call-out naming anyone who has points in the contest overall but logged nothing
 in that command's window.
 """
 
+import io
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -23,6 +27,7 @@ from discord.app_commands import Choice
 from discord.ext import commands
 
 import lib.config_store as config_store
+import lib.leaderboard_card as leaderboard_card
 import lib.tadoku_client as tadoku
 
 # Emoji shown for the top three ranks; every other rank gets a plain "#N".
@@ -283,18 +288,28 @@ def _format_entry_line(entry: dict) -> str:
     return f"{marker} {entry['user_display_name']} — {entry['score']:.1f}{tie}"
 
 
-async def build_yearend_embed(
+def _card_entry(entry: dict) -> dict:
+    """Map a leaderboard/ranked entry to a ``leaderboard_card`` row dict."""
+    return {
+        "rank": entry["rank"],
+        "name": entry["user_display_name"],
+        "score": entry["score"],
+        "is_tie": entry.get("is_tie", False),
+    }
+
+
+async def build_yearend_card(
     bot: commands.Bot, guild_id: Optional[int]
-) -> tuple[dict, Optional[discord.Embed]]:
-    """Resolve the guild's contest and render its cumulative standings as a
-    festive year-end recap.
+) -> tuple[dict, Optional[leaderboard_card.LeaderboardCard]]:
+    """Resolve the guild's contest and build its cumulative standings as a festive
+    year-end recap card.
 
     Used by the year-end alert (``cogs.alerts``). Unlike the weekly/monthly
     builder, this shows the contest's *cumulative* leaderboard -- the same data
     ``/leaderboard`` displays (via ``tadoku.get_contest_leaderboard``) -- topped
     with a podium congratulation for the top three finishers. Mirrors
-    ``build_period_leaderboard_embed``'s contract: returns ``(contest, embed)``
-    with ``embed=None`` when nobody's on the leaderboard, and raises
+    ``build_period_leaderboard_card``'s contract: returns ``(contest, card)`` with
+    ``card=None`` when nobody's on the leaderboard, and raises
     ``tadoku.TadokuAPIError`` if the lookup fails.
     """
     contest = await _resolve_contest(bot, guild_id)
@@ -305,31 +320,26 @@ async def build_yearend_embed(
     if not entries:
         return contest, None
 
-    embed = discord.Embed(
-        title=f"🎉 {contest['title']} — Final Standings 🎉",
-        description="\n".join(_format_entry_line(entry) for entry in entries),
-        color=discord.Color.gold(),
-    )
-    # Congratulate the podium (however many of the top 3 exist).
+    # Name the podium (however many of the top 3 exist) in the congrats line; the
+    # card itself already flags them with medal badges.
     podium = ", ".join(
-        f"{MEDALS[entry['rank']]} {entry['user_display_name']}"
-        for entry in entries[:3]
-        if entry["rank"] in MEDALS
+        entry["user_display_name"] for entry in entries[:3] if entry["rank"] in MEDALS
     )
     congrats = f"Congratulations to our top finishers — {podium}! " if podium else ""
-    embed.add_field(
-        name="​",  # zero-width so the field has no visible header
-        value=(
+    card = leaderboard_card.LeaderboardCard(
+        title=f"{contest['title']} — Final Standings",
+        entries=[_card_entry(entry) for entry in entries],
+        footer=f"{data.get('total_size', len(entries))} participants",
+        note_body=(
             f"{congrats}Thank you all for a fantastic year of immersion. "
-            "Hope to see everyone again next year! 🎊"
+            "Hope to see everyone again next year!"
         ),
-        inline=False,
+        accent="gold",
     )
-    embed.set_footer(text=f"{data.get('total_size', len(entries))} participants")
-    return contest, embed
+    return contest, card
 
 
-async def build_period_leaderboard_embed(
+async def build_period_leaderboard_card(
     bot: commands.Bot,
     guild_id: Optional[int],
     *,
@@ -337,21 +347,21 @@ async def build_period_leaderboard_embed(
     until: datetime | None = None,
     title_suffix: str,
     window_phrase: str,
-) -> tuple[dict, Optional[discord.Embed]]:
-    """Resolve the guild's contest and render a period ranking as an embed.
+) -> tuple[dict, Optional[leaderboard_card.LeaderboardCard]]:
+    """Resolve the guild's contest and build a period ranking card.
 
     Shared by the ``/weeklyleaderboard`` / ``/monthlyleaderboard`` commands and
     the automatic wrap-up alerts (``cogs.alerts``). Ranks participants by points
     logged in the window ``[cutoff, until)`` (tallied from raw logs, since the
     API's own leaderboard is only cumulative) and, when the guild's shame setting
-    is on, appends the "shame" call-out. ``title_suffix`` names the window in the
-    title; ``window_phrase`` is the prose form used in the footer and the shame
-    heading. ``until`` bounds the top of the window (``None`` = open-ended up to
-    now).
+    is on, appends the "shame" call-out as the card's note. ``title_suffix`` names
+    the window in the title; ``window_phrase`` is the prose form used in the footer
+    and the shame heading. ``until`` bounds the top of the window (``None`` =
+    open-ended up to now).
 
-    Returns ``(contest, embed)``. ``embed`` is ``None`` when nobody logged
-    anything in the window, leaving it to the caller to show an "empty" message
-    (the interactive commands) or simply skip posting (the alerts). Raises
+    Returns ``(contest, card)``. ``card`` is ``None`` when nobody logged anything
+    in the window, leaving it to the caller to show an "empty" message (the
+    interactive commands) or simply skip posting (the alerts). Raises
     ``tadoku.TadokuAPIError`` if resolving the contest or tallying logs fails.
     """
     contest = await _resolve_contest(bot, guild_id)
@@ -361,36 +371,32 @@ async def build_period_leaderboard_embed(
     if not ranked:
         return contest, None
 
-    # Show the top slice; the tally already covers everyone in the window.
-    lines = [_format_entry_line(entry) for entry in ranked[:PAGE_SIZE]]
-    embed = discord.Embed(
-        title=f"🗓️ {contest['title']} — {title_suffix}",
-        description="\n".join(lines),
-        color=discord.Color.blurple(),
-    )
-    shown = min(len(ranked), PAGE_SIZE)
-    embed.set_footer(
-        text=f"Top {shown} of {len(ranked)} · points logged in {window_phrase}"
-    )
-
-    # When enabled for this server (on by default), append a call to shame:
-    # everyone with contest points overall who logged nothing in the window.
+    # When enabled for this server (on by default), add a call to shame: everyone
+    # with contest points overall who logged nothing in the window.
+    note_title = note_body = None
     if config_store.get_guild_shame(guild_id):
         try:
             participants = await _scored_participants(bot, contest["id"])
         except tadoku.TadokuAPIError:
             # The ranking above already succeeded; a failed shame lookup
-            # shouldn't sink the whole embed, so just skip the section.
+            # shouldn't sink the whole card, so just skip the section.
             participants = []
         slackers = _shame_slackers(participants, totals)
         if slackers:
-            embed.add_field(
-                name=f"😤 Shame — logged nothing in {window_phrase}",
-                value=_format_shame_list(slackers),
-                inline=False,
-            )
+            note_title = f"Shame — logged nothing in {window_phrase}"
+            note_body = _format_shame_list(slackers)
 
-    return contest, embed
+    shown = min(len(ranked), PAGE_SIZE)
+    card = leaderboard_card.LeaderboardCard(
+        title=f"{contest['title']} — {title_suffix}",
+        # Show the top slice; the tally already covers everyone in the window.
+        entries=[_card_entry(entry) for entry in ranked[:PAGE_SIZE]],
+        footer=f"Top {shown} of {len(ranked)} · points logged in {window_phrase}",
+        note_title=note_title,
+        note_body=note_body,
+        accent="purple",
+    )
+    return contest, card
 
 
 class Leaderboard(commands.Cog):
@@ -517,16 +523,16 @@ class Leaderboard(commands.Cog):
     ) -> None:
         """Shared body for /weeklyleaderboard and /monthlyleaderboard.
 
-        Builds the period ranking embed via ``build_period_leaderboard_embed``
-        and delivers it, mapping the "couldn't reach tadoku.app" and empty-window
-        cases to their user-facing messages.
+        Builds the period ranking card via ``build_period_leaderboard_card``,
+        renders it to an image, and posts it -- mapping the "couldn't reach
+        tadoku.app" and empty-window cases to their user-facing messages.
         """
         # Tallying logs is several network calls; defer so Discord doesn't time
         # the interaction out. Public, like /leaderboard.
         await interaction.response.defer()
 
         try:
-            contest, embed = await build_period_leaderboard_embed(
+            contest, card = await build_period_leaderboard_card(
                 self.bot,
                 interaction.guild_id,
                 cutoff=cutoff,
@@ -540,7 +546,7 @@ class Leaderboard(commands.Cog):
             )
             return
 
-        if embed is None:
+        if card is None:
             # Nobody logged anything in the window (e.g. the contest ended before
             # it, or it's brand new with no logs yet).
             await interaction.followup.send(
@@ -548,7 +554,10 @@ class Leaderboard(commands.Cog):
             )
             return
 
-        await interaction.followup.send(embed=embed)
+        png = await leaderboard_card.render(card)
+        await interaction.followup.send(
+            file=discord.File(io.BytesIO(png), filename="leaderboard.png")
+        )
 
     @app_commands.command(
         name="weeklyleaderboard",

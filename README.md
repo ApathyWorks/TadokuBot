@@ -54,6 +54,10 @@ for that server's current contest — one on/off switch, one channel (defaults t
 | Monthly | The **1st, 00:00** | The just-ended month's ranking (same as `/monthlyleaderboard` for that month). |
 | Year-end | **Jan 1, 00:00** | The contest's final cumulative standings (same as `/leaderboard`), topped with a **top-3 podium congratulation**. |
 
+Each alert is posted as a rendered **image card** (the same one `/weeklyleaderboard`,
+`/monthlyleaderboard` and the year-end recap draw), so the bot needs **Attach Files** permission in
+the chosen channel.
+
 `/alerts off` disables all three; `/alerts status` shows the current channel. A background task
 checks hourly and posts each alert at most once per period, so it fires correctly across restarts or
 a missed midnight. The bot must be able to post in the chosen channel — `/alerts on` refuses one it
