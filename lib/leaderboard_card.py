@@ -5,14 +5,17 @@ the year-end recap. Same dark theme as the profile card: a rounded charcoal pane
 with a left accent stripe -- purple for the rolling/period rankings, gold for the
 year-end final standings. The **top three finishers are drawn larger**, each with
 a medal-coloured rank badge, so the podium reads at a glance; everyone below
-shares a smaller, uniform row. An optional note block under the list carries the
-extra prose the embeds used to (the weekly "shame" call-out, the year-end
-congratulations), and a footer line carries the count/window metadata.
+shares a smaller, uniform row. Each entry shows the person's Discord avatar (a
+placeholder disc when they aren't claimed) beside their name. An optional note
+block under the list carries the extra prose the embeds used to (the weekly
+"shame" call-out, the year-end congratulations), and a footer line carries the
+count/window metadata.
 
-Like the profile card, everything is authored in logical pixels, drawn at 2x and
-downsampled for antialiasing, and the CPU-bound render runs off the event loop via
-``render``. Display names are often Japanese, so the font cascade (reused from
-``lib.profile_card``) prefers a CJK-capable face.
+Everything is authored in logical pixels, drawn at ``SCALE``x for antialiasing and
+downsampled to ``ZOOM`` times the logical size -- so the card (and its text) come
+out 50% larger than the base design while staying crisp. The CPU-bound render runs
+off the event loop via ``render``. Display names are often Japanese, so the font
+cascade (reused from ``lib.profile_card``) prefers a CJK-capable face.
 """
 
 import asyncio
@@ -23,8 +26,15 @@ from typing import Optional
 from PIL import Image, ImageChops, ImageDraw
 
 from lib.profile_card import (
-    ACCENT, BG, HAIRLINE, INK, INK_SOFT, PANEL_BG, SCALE, _font, _oneline, _truncate,
+    ACCENT, BG, HAIRLINE, INK, INK_SOFT, PANEL_BG,
+    _circular_avatar, _font, _oneline, _truncate,
 )
+
+# Supersampling factor for antialiasing, and the enlargement of the final image
+# over the logical design (ZOOM=1.5 -> the card renders 50% bigger). SCALE/ZOOM is
+# the effective supersample ratio, so SCALE=3 keeps a clean 2x supersample.
+SCALE = 3
+ZOOM = 1.5
 
 WIDTH = 760
 MARGIN = 40
@@ -39,15 +49,24 @@ TOP_ROW_H = 58
 ROW_H = 42
 ROW_GAP = 4
 
+# Avatar column: a fixed-width slot (so names stay aligned) holding a larger disc
+# for the podium rows and a smaller one below.
+BADGE_W = 56
+AV_COL = 46
+AV_GAP = 12
+TOP_AVATAR_D = 44
+ROW_AVATAR_D = 32
+
 
 @dataclass
 class LeaderboardCard:
     """The data a leaderboard card renders -- all the info the old embed carried.
 
-    ``entries`` are dicts of ``rank``/``name``/``score``/``is_tie``. ``note_title``
-    + ``note_body`` are an optional call-out block (the weekly shame list, or the
-    year-end congratulations). ``accent`` picks the left-stripe colour: ``"purple"``
-    (period rankings) or ``"gold"`` (year-end final standings).
+    ``entries`` are dicts of ``rank``/``name``/``score``/``is_tie`` and an optional
+    ``avatar`` (Discord avatar bytes, or ``None`` for a placeholder disc).
+    ``note_title`` + ``note_body`` are an optional call-out block (the weekly shame
+    list, or the year-end congratulations). ``accent`` picks the left-stripe
+    colour: ``"purple"`` (period rankings) or ``"gold"`` (year-end final standings).
     """
     title: str
     entries: list[dict]
@@ -123,7 +142,7 @@ def _render(card: LeaderboardCard) -> bytes:
     footer_y = y + 4
     total_h = footer_y + 22 + MARGIN
 
-    # -- draw pass. --
+    # -- draw pass (in SCALE space; downsampled to ZOOM x logical at the end). --
     img = Image.new("RGBA", (WIDTH * S, total_h * S), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
     outer_box = (0, 0, WIDTH * S - 1, total_h * S - 1)
@@ -138,8 +157,8 @@ def _render(card: LeaderboardCard) -> bytes:
               (right - content_x) * S), font=title_font, fill=INK, anchor="la")
     draw.line((content_x * S, (MARGIN + 40) * S, right * S, (MARGIN + 40) * S), fill=HAIRLINE, width=S)
 
-    badge_w = 60  # rank-badge column width
-    name_x = content_x + badge_w + 16
+    avatar_cx = content_x + BADGE_W + AV_GAP + AV_COL / 2
+    name_x = content_x + BADGE_W + AV_GAP + AV_COL + AV_GAP
     for entry, y0, row_h, is_top in rows:
         mid = (y0 + row_h / 2) * S
         name_font = top_name_font if is_top else row_name_font
@@ -149,12 +168,21 @@ def _render(card: LeaderboardCard) -> bytes:
         # a plain soft "#N" for everyone else.
         if is_top:
             r = 21 * S
-            cx = (content_x + badge_w / 2) * S
+            cx = (content_x + BADGE_W / 2) * S
             draw.ellipse((cx - r, mid - r, cx + r, mid + r), fill=MEDAL[entry["rank"]])
             draw.text((cx, mid), str(entry["rank"]), font=top_badge_font, fill=BG, anchor="mm")
         else:
-            draw.text(((content_x + badge_w) * S, mid), f"#{entry['rank']}",
+            draw.text(((content_x + BADGE_W) * S, mid), f"#{entry['rank']}",
                       font=row_badge_font, fill=INK_SOFT, anchor="rm")
+
+        # Discord avatar (placeholder disc when the person isn't claimed), with a
+        # hairline ring, centred in the avatar column.
+        d = (TOP_AVATAR_D if is_top else ROW_AVATAR_D) * S
+        avatar = _circular_avatar(entry.get("avatar"), d)
+        ax = round(avatar_cx * S - d / 2)
+        ay = round(mid - d / 2)
+        img.paste(avatar, (ax, ay), avatar)
+        draw.ellipse((ax, ay, ax + d, ay + d), outline=HAIRLINE, width=S)
 
         # Score (right-aligned), with a soft "(tie)" marker to its left when shared.
         score_text = f"{entry['score']:.1f}"
@@ -167,7 +195,7 @@ def _render(card: LeaderboardCard) -> bytes:
                       font=tie_font, fill=INK_SOFT, anchor="rm")
             score_reserve += 12 * S + tie_w
 
-        # Name, trimmed to the space left between the badge and the score.
+        # Name, trimmed to the space left between the avatar and the score.
         name_max = right * S - name_x * S - score_reserve - 20 * S
         draw.text((name_x * S, mid), _truncate(draw, _oneline(entry["name"]), name_font, name_max),
                   font=name_font, fill=INK, anchor="lm")
@@ -194,13 +222,13 @@ def _render(card: LeaderboardCard) -> bytes:
               (right - content_x) * S), font=footer_font, fill=INK_SOFT, anchor="la")
 
     # Clip to the rounded silhouette (removes the accent's square caps), then a
-    # crisp border on top, then downsample.
+    # crisp border on top, then downsample to ZOOM x the logical size.
     outer_mask = Image.new("L", img.size, 0)
     ImageDraw.Draw(outer_mask).rounded_rectangle(outer_box, radius=outer_radius, fill=255)
     img.putalpha(ImageChops.multiply(img.getchannel("A"), outer_mask))
     ImageDraw.Draw(img).rounded_rectangle(outer_box, radius=outer_radius, outline=HAIRLINE, width=S)
 
-    img = img.resize((WIDTH, total_h), Image.LANCZOS)
+    img = img.resize((round(WIDTH * ZOOM), round(total_h * ZOOM)), Image.LANCZOS)
     buffer = io.BytesIO()
     img.save(buffer, format="PNG")
     return buffer.getvalue()

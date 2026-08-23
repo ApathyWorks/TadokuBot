@@ -951,6 +951,29 @@ async def test_yearend_card_handles_fewer_than_three_participants(fake_bot):
     assert "next year" in card.note_body.lower()
 
 
+async def test_period_card_attaches_claimed_members_avatars(fake_bot):
+    # ruby is claimed by Discord user 222 (whose avatar reads to bytes); the other
+    # ranked name is unclaimed, so its row gets no avatar.
+    from types import SimpleNamespace
+
+    config_store.set_claim(999, 222, "ruby")
+    user = SimpleNamespace(display_avatar=SimpleNamespace(read=AsyncMock(return_value=b"AVATAR")))
+    fake_bot.get_user = lambda uid: user if uid == 222 else None
+    fake_bot.fetch_user = AsyncMock()
+    tadoku_client.list_contest_logs.side_effect = _log_pager({0: _recent_logs(
+        ("u1", "ruby", 30), ("u2", "stranger", 10),
+    )})
+    cog = leaderboard_cog.Leaderboard(fake_bot)
+    interaction = make_interaction(guild_id=999)
+
+    await cog.weeklyleaderboard.callback(cog, interaction)
+
+    entries = {e["name"]: e for e in _rendered_card().entries}
+    assert entries["ruby"]["avatar"] == b"AVATAR"
+    assert entries["stranger"].get("avatar") is None
+    fake_bot.fetch_user.assert_not_awaited()  # cache hit via get_user
+
+
 async def test_yearend_card_uses_configured_contest(fake_bot):
     config_store.set_guild_contest(999, "configured-id", "Configured Contest")
     tadoku_client.get_contest_leaderboard.return_value = {

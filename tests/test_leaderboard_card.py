@@ -24,12 +24,29 @@ def _dims(card):
     return img.size  # (width, height)
 
 
-def test_render_returns_a_valid_png_of_fixed_width():
+def test_render_returns_a_valid_png_at_the_zoomed_width():
     card = leaderboard_card.LeaderboardCard(
         title="2026 Round 4 — last 7 days", entries=_entries(5), footer="Top 5 of 5")
     w, h = _dims(card)
-    assert w == leaderboard_card.WIDTH
+    # The card renders 50% larger than the logical design.
+    assert w == round(leaderboard_card.WIDTH * leaderboard_card.ZOOM)
     assert h > 0
+
+
+def test_renders_entries_with_avatars_without_error():
+    import io as _io
+
+    from PIL import Image as _Image
+    buf = _io.BytesIO()
+    _Image.new("RGB", (32, 32), (200, 100, 100)).save(buf, "PNG")
+    avatar = buf.getvalue()
+    card = leaderboard_card.LeaderboardCard(
+        title="t",
+        entries=[{"rank": 1, "name": "ruby", "score": 9.0, "is_tie": False, "avatar": avatar},
+                 {"rank": 2, "name": "unclaimed", "score": 8.0, "is_tie": False}],  # no avatar key
+        footer="f")
+    w, _ = _dims(card)
+    assert w == round(leaderboard_card.WIDTH * leaderboard_card.ZOOM)
 
 
 def test_more_rows_make_a_taller_card():
@@ -73,4 +90,4 @@ def test_renders_with_ties_and_cjk_names_without_error():
         ],
         footer="2 participants", accent="gold")
     w, h = _dims(card)
-    assert w == leaderboard_card.WIDTH and h > 0
+    assert w == round(leaderboard_card.WIDTH * leaderboard_card.ZOOM) and h > 0

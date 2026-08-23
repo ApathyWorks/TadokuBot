@@ -298,6 +298,49 @@ def _card_entry(entry: dict) -> dict:
     }
 
 
+async def _fetch_avatar(bot: commands.Bot, uid: int, cache: dict) -> Optional[bytes]:
+    """Return Discord user ``uid``'s avatar bytes, or ``None`` on any failure.
+
+    Memoised in ``cache`` so a name appearing twice (or a re-render) costs one
+    download at most.
+    """
+    if uid in cache:
+        return cache[uid]
+    user = bot.get_user(uid)
+    if user is None:
+        try:
+            user = await bot.fetch_user(uid)
+        except discord.HTTPException:
+            cache[uid] = None
+            return None
+    try:
+        data = await user.display_avatar.read()
+    except discord.HTTPException:
+        data = None
+    cache[uid] = data
+    return data
+
+
+async def _attach_avatars(bot: commands.Bot, guild_id: Optional[int], entries: list[dict]) -> None:
+    """Fill each entry's ``avatar`` with the claimed member's Discord avatar bytes.
+
+    Only names claimed via ``/claim`` in this guild resolve to a Discord user;
+    everyone else is left without an avatar (the card draws a placeholder disc).
+    Best-effort -- a lookup failure just leaves that row without a picture.
+    """
+    if not guild_id or not entries:
+        return
+    claims = config_store.get_guild_claims(guild_id)  # {discord_id_str: username}
+    if not claims:
+        return
+    by_name = {_normalize_name(username): int(uid) for uid, username in claims.items()}
+    cache: dict[int, Optional[bytes]] = {}
+    for entry in entries:
+        uid = by_name.get(_normalize_name(entry["name"]))
+        if uid is not None:
+            entry["avatar"] = await _fetch_avatar(bot, uid, cache)
+
+
 async def build_yearend_card(
     bot: commands.Bot, guild_id: Optional[int]
 ) -> tuple[dict, Optional[leaderboard_card.LeaderboardCard]]:
@@ -326,9 +369,11 @@ async def build_yearend_card(
         entry["user_display_name"] for entry in entries[:3] if entry["rank"] in MEDALS
     )
     congrats = f"Congratulations to our top finishers — {podium}! " if podium else ""
+    card_entries = [_card_entry(entry) for entry in entries]
+    await _attach_avatars(bot, guild_id, card_entries)
     card = leaderboard_card.LeaderboardCard(
         title=f"{contest['title']} — Final Standings",
-        entries=[_card_entry(entry) for entry in entries],
+        entries=card_entries,
         footer=f"{data.get('total_size', len(entries))} participants",
         note_body=(
             f"{congrats}Thank you all for a fantastic year of immersion. "
@@ -387,10 +432,12 @@ async def build_period_leaderboard_card(
             note_body = _format_shame_list(slackers)
 
     shown = min(len(ranked), PAGE_SIZE)
+    # Show the top slice; the tally already covers everyone in the window.
+    card_entries = [_card_entry(entry) for entry in ranked[:PAGE_SIZE]]
+    await _attach_avatars(bot, guild_id, card_entries)
     card = leaderboard_card.LeaderboardCard(
         title=f"{contest['title']} — {title_suffix}",
-        # Show the top slice; the tally already covers everyone in the window.
-        entries=[_card_entry(entry) for entry in ranked[:PAGE_SIZE]],
+        entries=card_entries,
         footer=f"Top {shown} of {len(ranked)} · points logged in {window_phrase}",
         note_title=note_title,
         note_body=note_body,
