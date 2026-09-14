@@ -19,6 +19,9 @@ This module maps a log to a poster image, by tag:
   * tv/movie/show (live-action) -> TMDB (needs ``TMDB_API_KEY``); anime is routed
                    to MyAnimeList above, so only non-anime screen media lands here
 
+A VNDB cover that VNDB itself flags as NSFW is never posted: the lookup swaps in
+the bundled ``images/anime-disgust.png`` instead (see ``_vndb_is_nsfw``).
+
 Every lookup is strictly best-effort: a miss, a missing API key, or any
 network/parse failure yields ``None`` so the log feed simply falls back to the
 poster-less card. The title is cleaned of volume/episode markers first, which
@@ -42,6 +45,21 @@ _log = logging.getLogger(__name__)
 # Cap every request so a slow upstream can't stall the log-feed poll. Posters are
 # a nice-to-have, so we fail fast rather than hold the card.
 _TIMEOUT = aiohttp.ClientTimeout(total=8)
+
+# The stand-in poster used in place of a VNDB cover flagged NSFW. Resolved
+# relative to this file (lib/ -> project root) so it works from any cwd.
+_NSFW_POSTER_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "images", "anime-disgust.png"
+)
+
+# VNDB's own NSFW cutoff for its 0-2 image-flagging averages. VNDB's API marks an
+# image NSFW when either the sexual or violence average is above 0.4 -- the point
+# its site starts calling an image "Suggestive"/"Violent" and hides it by default.
+_VNDB_NSFW_THRESHOLD = 0.4
+
+# Sentinel returned instead of a URL when the matched cover is NSFW; tells
+# ``fetch_poster`` to use the local stand-in rather than download anything.
+_NSFW = "nsfw"
 
 # Cap the search query length -- MAL rejects overly long ``q`` values, and the
 # extra words past a title's head only hurt the match anyway.
@@ -118,9 +136,10 @@ async def fetch_poster(
 
     Routes on the log's ``tags`` (see ``_category``), cleans ``description`` into
     a search query, looks up an image URL from the matching service, and
-    downloads it. Any failure at any step -- unknown category, empty title,
-    missing key, network error, decode-less bytes -- collapses to ``None`` so the
-    caller can fall back to the poster-less card.
+    downloads it. A cover VNDB flags as NSFW is replaced by the bundled stand-in
+    image rather than downloaded. Any failure at any step -- unknown category,
+    empty title, missing key, network error, decode-less bytes -- collapses to
+    ``None`` so the caller can fall back to the poster-less card.
 
     ``cache`` (if given) memoises results by (category, title) so a burst of the
     same material costs a single lookup + download.
@@ -138,7 +157,9 @@ async def fetch_poster(
     result: Optional[bytes] = None
     try:
         url = await _image_url(session, category, title[:_MAX_QUERY])
-        if url:
+        if url == _NSFW:
+            result = _nsfw_poster()
+        elif url:
             result = await _download(session, url)
     except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as e:
         _log.warning("Poster lookup for %r (%s) failed: %s", title, category, e)
@@ -157,6 +178,8 @@ async def _image_url(
         return await _vndb_image_url(session, title)
     if category == "game":
         # VNs have the nicest art on VNDB; fall back to Steam for everything else.
+        # An NSFW VNDB hit is still a hit (the ``_NSFW`` sentinel is truthy): it
+        # names this exact work, so we don't trade the stand-in for a Steam guess.
         return await _vndb_image_url(session, title) or await _steam_image_url(session, title)
     if category in ("anime", "manga"):
         return await _mal_image_url(session, category, title)
@@ -234,8 +257,16 @@ async def _tmdb_image_url(
 async def _vndb_image_url(
     session: aiohttp.ClientSession, title: str
 ) -> Optional[str]:
-    """Look up a visual-novel cover on VNDB's Kana API (no key needed)."""
-    body = {"filters": ["search", "=", title], "fields": "image.url", "results": 1}
+    """Look up a visual-novel cover on VNDB's Kana API (no key needed).
+
+    Returns the cover URL, ``None`` on a miss, or the ``_NSFW`` sentinel when VNDB
+    flags the cover NSFW (see ``_vndb_is_nsfw``).
+    """
+    body = {
+        "filters": ["search", "=", title],
+        "fields": "image.url, image.sexual, image.violence, image.votecount",
+        "results": 1,
+    }
     async with session.post(
         "https://api.vndb.org/kana/vn", json=body, timeout=_TIMEOUT
     ) as resp:
@@ -246,7 +277,41 @@ async def _vndb_image_url(
     if not results:
         return None
     image = results[0].get("image") or {}
-    return image.get("url")
+    url = image.get("url")
+    if url and _vndb_is_nsfw(image):
+        return _NSFW
+    return url
+
+
+def _vndb_is_nsfw(image: dict) -> bool:
+    """Whether VNDB considers a cover NSFW, by VNDB's own rule.
+
+    Mirrors how VNDB computes its API's ``nsfw`` flag: an image is NSFW if its
+    average sexual *or* violence flagging vote is above 0.4 (on the 0-2 scale), or
+    if nobody has voted on it yet -- VNDB treats an unrated image as NSFW until
+    someone checks it, and so do we. A missing vote count reads as unrated, so a
+    response without the flagging fields errs toward the stand-in, not the cover.
+    """
+    if not image.get("votecount"):
+        return True
+    sexual = image.get("sexual") or 0
+    violence = image.get("violence") or 0
+    return sexual > _VNDB_NSFW_THRESHOLD or violence > _VNDB_NSFW_THRESHOLD
+
+
+def _nsfw_poster() -> Optional[bytes]:
+    """The stand-in poster's bytes, or ``None`` if the file can't be read.
+
+    Read on use rather than at import, so a missing file costs only that card its
+    poster (and a warning) -- never the bot its startup, and never a fallback to
+    the NSFW cover. ``fetch_poster``'s cache keeps repeats from re-reading it.
+    """
+    try:
+        with open(_NSFW_POSTER_PATH, "rb") as f:
+            return f.read()
+    except OSError as e:
+        _log.warning("NSFW stand-in poster unavailable at %s: %s", _NSFW_POSTER_PATH, e)
+        return None
 
 
 async def _steam_image_url(

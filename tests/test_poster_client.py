@@ -57,6 +57,12 @@ class _FakeSession:
         return self._next("HEAD", url, **kwargs)
 
 
+def _vndb_hit(url, *, sexual=0.0, violence=0.0, votecount=5):
+    """A VNDB search response with one cover; rated safe unless told otherwise."""
+    image = {"url": url, "sexual": sexual, "violence": violence, "votecount": votecount}
+    return _FakeResponse(json_data={"results": [{"image": image}]})
+
+
 @pytest.fixture(autouse=True)
 def _clear_keys(monkeypatch):
     # Default to no API keys so tests are explicit about enabling a source.
@@ -141,7 +147,7 @@ async def test_fetch_poster_returns_none_for_empty_title():
 
 async def test_vndb_game_lookup_parses_image_url_and_downloads():
     session = _FakeSession([
-        _FakeResponse(json_data={"results": [{"image": {"url": "https://t.vndb.org/cv/x.jpg"}}]}),
+        _vndb_hit("https://t.vndb.org/cv/x.jpg"),
         _FakeResponse(body=b"IMGBYTES"),
     ])
     out = await poster_client.fetch_poster(session, ["fiction", "game"], "Summer Pockets")
@@ -150,6 +156,10 @@ async def test_vndb_game_lookup_parses_image_url_and_downloads():
     method, url, kwargs = session.calls[0]
     assert method == "POST" and "api.vndb.org/kana/vn" in url
     assert kwargs["json"]["filters"] == ["search", "=", "Summer Pockets"]
+    # The flagging fields are requested too, so NSFW covers can be caught.
+    fields = kwargs["json"]["fields"]
+    for field in ("image.url", "image.sexual", "image.violence", "image.votecount"):
+        assert field in fields
 
 
 async def test_vndb_returns_none_when_no_results():
@@ -162,6 +172,55 @@ async def test_vndb_returns_none_when_no_results():
 async def test_vndb_returns_none_when_image_is_null():
     session = _FakeSession([_FakeResponse(json_data={"results": [{"image": None}]})])
     assert await poster_client.fetch_poster(session, ["vn"], "Coverless VN") is None
+
+
+# ---------------------------------------------------------------------------
+# VNDB NSFW covers -> bundled stand-in
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("rating", [
+    {"sexual": 1.8},                 # explicit
+    {"sexual": 0.5},                 # suggestive -- just past VNDB's 0.4 cutoff
+    {"violence": 0.9},               # violent, however tame sexually
+    {"votecount": 0},                # unrated -- VNDB treats these as NSFW too
+], ids=["explicit", "suggestive", "violent", "unrated"])
+async def test_vndb_nsfw_cover_is_replaced_by_stand_in(rating):
+    # Only the search is queued: downloading the NSFW cover would IndexError.
+    session = _FakeSession([_vndb_hit("https://t.vndb.org/cv/nsfw.jpg", **rating)])
+    out = await poster_client.fetch_poster(session, ["vn"], "Some VN")
+    with open(poster_client._NSFW_POSTER_PATH, "rb") as f:
+        assert out == f.read()
+    assert len(session.calls) == 1
+
+
+async def test_vndb_rating_at_the_cutoff_is_still_safe():
+    # VNDB's rule is strictly "above 0.4", so an average of exactly 0.4 posts the cover.
+    session = _FakeSession([
+        _vndb_hit("https://t.vndb.org/cv/ok.jpg", sexual=0.4, violence=0.4),
+        _FakeResponse(body=b"COVER"),
+    ])
+    assert await poster_client.fetch_poster(session, ["vn"], "Some VN") == b"COVER"
+
+
+async def test_game_with_nsfw_vndb_cover_uses_stand_in_not_steam():
+    # VNDB matched the work, so its NSFW flag stands: no Steam lookup (would IndexError).
+    session = _FakeSession([_vndb_hit("https://t.vndb.org/cv/nsfw.jpg", sexual=2.0)])
+    out = await poster_client.fetch_poster(session, ["game"], "Some Eroge")
+    assert out is not None
+    assert len(session.calls) == 1
+
+
+async def test_nsfw_cover_with_missing_stand_in_yields_no_poster(monkeypatch, tmp_path):
+    # A missing stand-in drops the poster entirely -- it must never fall back to the NSFW cover.
+    monkeypatch.setattr(poster_client, "_NSFW_POSTER_PATH", str(tmp_path / "gone.png"))
+    session = _FakeSession([_vndb_hit("https://t.vndb.org/cv/nsfw.jpg", sexual=2.0)])
+    assert await poster_client.fetch_poster(session, ["vn"], "Some VN") is None
+    assert len(session.calls) == 1
+
+
+def test_bundled_stand_in_is_a_png():
+    with open(poster_client._NSFW_POSTER_PATH, "rb") as f:
+        assert f.read(8) == b"\x89PNG\r\n\x1a\n"
 
 
 async def test_game_falls_back_to_steam_when_vndb_misses():
@@ -361,7 +420,7 @@ async def test_non_200_search_yields_none(monkeypatch):
 
 async def test_non_200_download_yields_none():
     session = _FakeSession([
-        _FakeResponse(json_data={"results": [{"image": {"url": "https://x/y.jpg"}}]}),
+        _vndb_hit("https://x/y.jpg"),
         _FakeResponse(status=404),
     ])
     assert await poster_client.fetch_poster(session, ["game"], "Summer Pockets") is None
@@ -369,7 +428,7 @@ async def test_non_200_download_yields_none():
 
 async def test_fetch_poster_memoises_via_cache():
     session = _FakeSession([
-        _FakeResponse(json_data={"results": [{"image": {"url": "https://x/y.jpg"}}]}),
+        _vndb_hit("https://x/y.jpg"),
         _FakeResponse(body=b"IMG"),
     ])
     cache: dict = {}
