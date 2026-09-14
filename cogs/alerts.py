@@ -8,18 +8,23 @@ together and picks the single channel they post to:
   * **yearly**  -- the contest's final cumulative standings with a top-3 podium
     congratulation, on Jan 1.
 
-A background loop (``check_alerts``) runs hourly: for every guild with alerts
-enabled, once a calendar period rolls over it renders the leaderboard card for
-that kind (weekly/monthly via ``build_period_leaderboard_card``; yearly via
-``build_yearend_card``) and posts the image to the configured channel. A
-per-guild, per-kind ``last_period`` marker makes each alert fire exactly once per
-period and survive restarts (it catches up on the next tick if the bot was down
-when the period rolled over).
+A background loop (``check_alerts``) runs every hour **on** the hour, in UTC --
+which is also tadoku.app's clock, so a period rolls over here exactly when the
+site's does. For every guild with alerts enabled, once a calendar period rolls
+over it renders the leaderboard card for that kind (weekly/monthly via
+``build_period_leaderboard_card``; yearly via ``build_yearend_card``) and posts
+the image to the configured channel. The 00:00 tick is the one that normally
+fires them, so a wrap-up lands at midnight sharp rather than at whatever minute
+past the hour the bot last started on.
+
+A per-guild, per-kind ``last_period`` marker makes each alert fire exactly once
+per period and survive restarts: if the bot was down (or tadoku.app unreachable)
+when the period rolled over, the next hourly tick still posts it.
 """
 
 import io
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, time, timedelta, timezone
 from typing import Optional
 
 import discord
@@ -34,10 +39,15 @@ from lib.permissions import is_admin
 
 _log = logging.getLogger(__name__)
 
-# How often the scheduler wakes to check whether a period has rolled over. Hourly
-# is plenty: a wrap-up only needs to land within an hour of the week/month
-# boundary, and the last_period marker guarantees it posts just once.
-CHECK_INTERVAL_HOURS = 1
+# When the scheduler wakes to check whether a period has rolled over: every hour,
+# **on** the hour, in UTC (discord.py reads naive times as UTC -- which is also
+# tadoku.app's own clock, so these are the same boundaries the site's days roll
+# over on). Anchoring to the wall clock rather than an interval is what makes a
+# wrap-up land at 00:00 sharp instead of at whatever minute past the hour the bot
+# happened to start on. The remaining 23 ticks cost nothing (last_period makes
+# them no-ops) and are what lets a wrap-up still go out if the bot was down at
+# midnight.
+CHECK_TIMES = [time(hour=hour) for hour in range(24)]
 
 
 def _period_key(kind: str, now: datetime) -> list[int]:
@@ -97,9 +107,9 @@ class Alerts(commands.Cog):
 
     # -- scheduler ----------------------------------------------------------
 
-    @tasks.loop(hours=CHECK_INTERVAL_HOURS)
+    @tasks.loop(time=CHECK_TIMES)
     async def check_alerts(self) -> None:
-        """Hourly tick: post any wrap-ups whose period has rolled over."""
+        """On-the-hour tick: post any wrap-ups whose period has rolled over."""
         await self._run_due_alerts(datetime.now(timezone.utc))
 
     @check_alerts.before_loop
@@ -240,7 +250,8 @@ class Alerts(commands.Cog):
         self._set_all_alerts(interaction.guild_id, enabled=True, channel_id=target.id)
         await interaction.response.send_message(
             f"✅ Alerts are **on** in {target.mention}: the weekly wrap-up (Mondays), the monthly "
-            "wrap-up (the 1st), and the year-end recap (Jan 1), all at 00:00 UTC.",
+            "wrap-up (the 1st), and the year-end recap (Jan 1), all at 00:00 UTC — tadoku.app's "
+            "own day boundary.",
             ephemeral=True,
         )
 

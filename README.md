@@ -44,9 +44,10 @@ reject unauthorized users with an ephemeral message.
 
 ## Scheduled alerts
 
-`/alerts on channel:#somewhere` opts a server into three automatic posts (all times **UTC**), each
-for that server's current contest — one on/off switch, one channel (defaults to the channel you run
-`/alerts on` in):
+`/alerts on channel:#somewhere` opts a server into three automatic posts (all times **UTC**, which is
+also [tadoku.app](https://tadoku.app)'s own clock — the site's contest days roll over at 00:00 UTC
+too), each for that server's current contest — one on/off switch, one channel (defaults to the
+channel you run `/alerts on` in):
 
 | Alert | When | Content |
 | --- | --- | --- |
@@ -59,9 +60,10 @@ Each alert is posted as a rendered **image card** (the same one `/weeklyleaderbo
 the chosen channel.
 
 `/alerts off` disables all three; `/alerts status` shows the current channel. A background task
-checks hourly and posts each alert at most once per period, so it fires correctly across restarts or
-a missed midnight. The bot must be able to post in the chosen channel — `/alerts on` refuses one it
-can't send to.
+checks every hour **on** the hour and posts each alert at most once per period, so a wrap-up lands at
+midnight sharp — not at whatever minute past the hour the bot last restarted on — and still goes out
+on a later tick if the bot was down at midnight. The bot must be able to post in the chosen
+channel — `/alerts on` refuses one it can't send to.
 
 ## Live log feed
 
