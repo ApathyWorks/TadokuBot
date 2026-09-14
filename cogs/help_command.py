@@ -55,7 +55,7 @@ MEDIA_TAGS = [
 ADMIN_COMMANDS = [
     ("/set_contest", "Pick which contest /leaderboard shows."),
     ("/shame", "Toggle the weekly \"logged nothing\" call-out."),
-    ("/alerts on|off|status", "Automatic weekly / monthly / year-end leaderboard posts."),
+    ("/alerts on|off|status", "Automatic daily top-logger / weekly / monthly / year-end posts."),
     ("/log on|off|status", "Live feed of new contest logs to a channel."),
     ("/autoclaim", "Auto-link participants to same-named Discord members."),
 ]

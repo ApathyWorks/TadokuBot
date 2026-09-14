@@ -985,3 +985,160 @@ async def test_yearend_card_uses_configured_contest(fake_bot):
 
     assert contest == CONFIGURED_CONTEST
     assert "Configured Contest" in card.title
+
+
+# ---------------------------------------------------------------------------
+# build_daily_top_card (the daily alert's top-logger spotlight)
+# ---------------------------------------------------------------------------
+
+DAY = datetime(2026, 9, 13, tzinfo=timezone.utc)
+
+
+def _day_log(user_id, name, score, hour, description="Summer Pockets", deleted=False, day=DAY):
+    log = _log(user_id, name, score, _iso(day + timedelta(hours=hour)), deleted=deleted)
+    log["description"] = description
+    return log
+
+
+def _serve_day(*logs):
+    """Serve ``logs`` newest-first, as the API does."""
+    ordered = sorted(logs, key=lambda log: log["created_at"], reverse=True)
+    tadoku_client.list_contest_logs.side_effect = _log_pager({0: ordered})
+
+
+async def test_daily_card_spotlights_the_top_scorer_with_their_titles(fake_bot):
+    _serve_day(
+        _day_log("u1", "ruby", 30, 20, "呪術廻戦"),
+        _day_log("u1", "ruby", 12, 9, "Summer Pockets"),
+        _day_log("u1", "ruby", 5, 8, "呪術廻戦"),
+        _day_log("u2", "ryun", 20, 12),
+    )
+
+    contest, card = await leaderboard_cog.build_daily_top_card(fake_bot, 999, day_start=DAY)
+
+    assert contest == LATEST_OFFICIAL
+    assert card.name == "ruby"
+    assert card.score == 47.0
+    # Repeat logs of a title collapse into one line; most points first.
+    assert card.titles == [("呪術廻戦", 35.0), ("Summer Pockets", 12.0)]
+    assert card.date_label == "Sunday, September 13, 2026"
+    assert card.note_title == "Everyone else"
+    assert card.note_body.startswith("Pick up the slack!")
+    assert card.footer == "2026 Round 4 · 2 people logged"
+
+
+async def test_daily_card_counts_only_that_day_and_skips_deleted_logs(fake_bot):
+    _serve_day(
+        _day_log("u2", "ryun", 500, 0, day=DAY + timedelta(days=1)),   # next day: excluded
+        _day_log("u1", "ruby", 10, 23),
+        _day_log("u2", "ryun", 400, 22, deleted=True),                 # deleted: excluded
+        _day_log("u2", "ryun", 4, 0),                                  # midnight: included
+        _day_log("u2", "ryun", 900, -1),                               # previous day: excluded
+    )
+
+    _contest, card = await leaderboard_cog.build_daily_top_card(fake_bot, 999, day_start=DAY)
+
+    assert card.name == "ruby" and card.score == 10.0
+    assert card.footer.endswith("2 people logged")
+
+
+async def test_daily_card_titles_group_case_insensitively_and_blank_is_untitled(fake_bot):
+    _serve_day(
+        _day_log("u1", "ruby", 3, 10, "summer  pockets"),
+        _day_log("u1", "ruby", 4, 11, "Summer Pockets"),     # newest spelling wins
+        _day_log("u1", "ruby", 2, 9, None),
+        _day_log("u1", "ruby", 1, 8, "   "),
+    )
+
+    _contest, card = await leaderboard_cog.build_daily_top_card(fake_bot, 999, day_start=DAY)
+
+    assert card.titles == [("Summer Pockets", 7.0), ("Untitled", 3.0)]
+
+
+async def test_daily_card_is_none_when_nobody_logged(fake_bot):
+    _serve_day()
+
+    contest, card = await leaderboard_cog.build_daily_top_card(fake_bot, 999, day_start=DAY)
+
+    assert contest == LATEST_OFFICIAL
+    assert card is None
+
+
+async def test_daily_card_is_none_when_nobody_earned_points(fake_bot):
+    _serve_day(_day_log("u1", "ruby", 0, 10))
+
+    _contest, card = await leaderboard_cog.build_daily_top_card(fake_bot, 999, day_start=DAY)
+
+    assert card is None
+
+
+async def test_daily_card_breaks_a_tie_by_name_so_retries_agree(fake_bot):
+    _serve_day(_day_log("u1", "zeta", 20, 10), _day_log("u2", "Alpha", 20, 11))
+
+    _contest, card = await leaderboard_cog.build_daily_top_card(fake_bot, 999, day_start=DAY)
+
+    assert card.name == "Alpha"
+
+
+async def test_daily_call_out_when_the_top_logger_was_alone(fake_bot):
+    _serve_day(_day_log("u1", "ruby", 20, 10))
+
+    _contest, card = await leaderboard_cog.build_daily_top_card(fake_bot, 999, day_start=DAY)
+
+    assert card.note_body == "Pick up the slack! ruby was the only one who logged anything."
+    assert card.footer.endswith("1 person logged")
+
+
+async def test_daily_call_out_when_the_top_logger_beat_everyone_combined(fake_bot):
+    _serve_day(
+        _day_log("u1", "ruby", 50, 10), _day_log("u2", "ryun", 20, 10), _day_log("u3", "anja", 10, 10),
+    )
+
+    _contest, card = await leaderboard_cog.build_daily_top_card(fake_bot, 999, day_start=DAY)
+
+    assert card.note_body == "Pick up the slack! ruby out-logged the other 2 of you combined."
+
+
+async def test_daily_call_out_when_the_rest_together_outscored_the_top(fake_bot):
+    _serve_day(
+        _day_log("u1", "ruby", 30, 10), _day_log("u2", "ryun", 20, 10), _day_log("u3", "anja", 20, 10),
+    )
+
+    _contest, card = await leaderboard_cog.build_daily_top_card(fake_bot, 999, day_start=DAY)
+
+    # "out-logged ... combined" would be false here, so the line only claims the pace.
+    assert "combined" not in card.note_body
+    assert card.note_body.startswith("Pick up the slack! ruby set the pace")
+
+
+async def test_daily_card_attaches_the_claimed_top_loggers_avatar(fake_bot):
+    from types import SimpleNamespace
+
+    config_store.set_claim(999, 222, "Ruby")  # claims match names case-insensitively
+    user = SimpleNamespace(display_avatar=SimpleNamespace(read=AsyncMock(return_value=b"AVATAR")))
+    fake_bot.get_user = lambda uid: user if uid == 222 else None
+    fake_bot.fetch_user = AsyncMock()
+    _serve_day(_day_log("u1", "ruby", 30, 10))
+
+    _contest, card = await leaderboard_cog.build_daily_top_card(fake_bot, 999, day_start=DAY)
+
+    assert card.avatar == b"AVATAR"
+
+
+async def test_daily_card_unclaimed_top_logger_gets_the_placeholder(fake_bot):
+    _serve_day(_day_log("u1", "ruby", 30, 10))
+
+    _contest, card = await leaderboard_cog.build_daily_top_card(fake_bot, 999, day_start=DAY)
+
+    assert card.avatar is None
+
+
+async def test_daily_card_uses_the_guilds_configured_contest(fake_bot):
+    config_store.set_guild_contest(999, "configured-id", "Configured Contest")
+    _serve_day(_day_log("u1", "ruby", 30, 10))
+
+    contest, card = await leaderboard_cog.build_daily_top_card(fake_bot, 999, day_start=DAY)
+
+    assert contest == CONFIGURED_CONTEST
+    assert tadoku_client.list_contest_logs.await_args.args[1] == "configured-id"
+    assert card.footer.startswith("Configured Contest")

@@ -120,32 +120,47 @@ def set_guild_shame(guild_id: int, enabled: bool) -> None:
     _write(data)
 
 
-# The automatic alerts, each configured independently per guild. All three share
+# The automatic alerts, each configured independently per guild. All of them share
 # one on/off switch and channel via ``/alerts``, but keep their own ``last_period``
-# marker so they fire on their own boundaries (Monday / the 1st / Jan 1).
-ALERT_KINDS = ("weekly", "monthly", "yearly")
+# marker so they fire on their own boundaries (midnight / Monday / the 1st / Jan 1).
+# ``daily`` comes first so a Monday's day recap posts ahead of the week's wrap-up.
+ALERT_KINDS = ("daily", "weekly", "monthly", "yearly")
+
+# Kinds added after ``/alerts`` shipped, mapped to the kind whose switch and
+# channel they follow until a guild's own settings for them are written. A guild
+# that turned alerts on before ``daily`` existed has no daily entry; rather than
+# stay silent until an admin re-runs ``/alerts on``, its daily alert follows the
+# weekly one (the representative kind ``/alerts status`` reports). The next
+# ``/alerts on|off`` writes daily's own settings, ending the fallback.
+_ALERT_FALLBACK = {"daily": "weekly"}
 
 
 def get_guild_alert(guild_id: int, kind: str) -> dict:
-    """Return a guild's settings for the ``kind`` ("weekly"/"monthly"/"yearly") alert.
+    """Return a guild's settings for the ``kind`` (one of ``ALERT_KINDS``) alert.
 
     Always returns a dict with all three keys so callers never have to guard for
     absence:
 
       * ``enabled``     -- whether the alert posts automatically (default False).
       * ``channel_id``  -- the channel to post in (int), or ``None`` if unset.
-      * ``last_period`` -- the last period already posted, as ``[year, week]``
-        (weekly), ``[year, month]`` (monthly) or ``[year]`` (yearly), or ``None``
-        if never posted. The scheduler uses this to fire once per period and to
-        avoid re-posting.
+      * ``last_period`` -- the last period already posted, as ``[year, month,
+        day]`` (daily), ``[year, week]`` (weekly), ``[year, month]`` (monthly) or
+        ``[year]`` (yearly), or ``None`` if never posted. The scheduler uses this
+        to fire once per period and to avoid re-posting.
+
+    A kind in ``_ALERT_FALLBACK`` takes ``enabled``/``channel_id`` from the kind it
+    follows for as long as its own entry lacks them (never ``last_period``, which
+    is always per-kind).
     """
     if kind not in ALERT_KINDS:
         raise ValueError(f"unknown alert kind: {kind!r}")
     entry = _read().get(str(guild_id)) or {}
-    settings = (entry.get("alerts") or {}).get(kind) or {}
+    alerts = entry.get("alerts") or {}
+    settings = alerts.get(kind) or {}
+    followed = alerts.get(_ALERT_FALLBACK.get(kind)) or {}
     return {
-        "enabled": settings.get("enabled", False),
-        "channel_id": settings.get("channel_id"),
+        "enabled": settings.get("enabled", followed.get("enabled", False)),
+        "channel_id": settings.get("channel_id", followed.get("channel_id")),
         "last_period": settings.get("last_period"),
     }
 

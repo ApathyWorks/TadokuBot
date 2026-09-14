@@ -9,7 +9,8 @@ the current calendar month) to build the rolling/period rankings the API doesn't
 expose directly, and render them as **image cards** (``lib.leaderboard_card``)
 where the top three are drawn larger with medal badges. ``build_*_card`` assemble
 the card model (shared with the scheduled alerts in ``cogs.alerts``, which also
-render the year-end recap this way).
+render the year-end recap this way). ``build_daily_top_card`` builds the
+end-of-day "top logger" spotlight (``lib.daily_card``) for the daily alert.
 
 When a server has the shame setting on (the default; toggled via ``/shame``),
 ``/weeklyleaderboard`` and ``/monthlyleaderboard`` also append a "shame"
@@ -19,7 +20,7 @@ in that command's window.
 
 import io
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import AsyncIterator, Optional
 
 import discord
 from discord import app_commands
@@ -27,6 +28,7 @@ from discord.app_commands import Choice
 from discord.ext import commands
 
 import lib.config_store as config_store
+import lib.daily_card as daily_card
 import lib.leaderboard_card as leaderboard_card
 import lib.tadoku_client as tadoku
 
@@ -141,6 +143,43 @@ def _parse_timestamp(value: str) -> datetime:
     return datetime.fromisoformat(value.replace("Z", "+00:00"))
 
 
+async def _logs_in_window(
+    bot: commands.Bot,
+    contest_id: str,
+    cutoff: datetime,
+    until: datetime | None = None,
+) -> AsyncIterator[dict]:
+    """Yield a contest's non-deleted logs created in the window ``[cutoff, until)``.
+
+    Pages through the contest's logs (which arrive newest-first), so they're
+    yielded newest-first too. Because of that ordering, the first log older than
+    the cutoff means every remaining log is older too, so paging stops right
+    there. Deleted logs are skipped.
+
+    ``until`` is an optional exclusive upper bound: logs at or after it are
+    skipped (used to scope to a window that ended before now -- a past calendar
+    month, or yesterday for the daily alert). Left ``None`` the window is
+    open-ended up to now. Since logs are newest-first, any too-new logs are seen
+    and skipped before the in-window ones on the same pages.
+    """
+    for page in range(MAX_LOG_PAGES):
+        logs = await tadoku.list_contest_logs(bot.session, contest_id, page=page, page_size=LOG_PAGE_SIZE)
+        for log in logs:
+            created = _parse_timestamp(log["created_at"])
+            # Newest-first ordering: once we cross the cutoff we're done entirely.
+            if created < cutoff:
+                return
+            # Newer than the window -- skip, but keep scanning back toward the cutoff.
+            if until is not None and created >= until:
+                continue
+            if log.get("deleted"):
+                continue
+            yield log
+        # A short/empty page is the end of the log history.
+        if len(logs) < LOG_PAGE_SIZE:
+            return
+
+
 async def _tally_scores_since(
     bot: commands.Bot,
     contest_id: str,
@@ -149,43 +188,47 @@ async def _tally_scores_since(
 ) -> dict[str, list]:
     """Sum each participant's log scores in the window ``[cutoff, until)``.
 
-    Pages through the contest's logs (which arrive newest-first) and accumulates
-    ``score`` per user for logs on/after ``cutoff``. Because the logs are ordered
-    newest-first, the first log older than the cutoff means every remaining log
-    is older too, so we stop immediately. Deleted logs are skipped.
-
-    ``until`` is an optional exclusive upper bound: logs at or after it are
-    skipped (used to scope to a *past* calendar month, whose window ends before
-    now). Left ``None`` the window is open-ended up to now. Since logs are
-    newest-first, any too-new logs are seen and skipped before the in-window ones
-    on the same pages.
-
-    Returns ``{user_id: [display_name, total_score]}``; the display name is taken
-    from each user's newest log in the window (the first one counted).
+    See ``_logs_in_window`` for how the window is scanned. Returns
+    ``{user_id: [display_name, total_score]}``; the display name is taken from
+    each user's newest log in the window (the first one counted).
     """
     totals: dict[str, list] = {}
-    for page in range(MAX_LOG_PAGES):
-        logs = await tadoku.list_contest_logs(bot.session, contest_id, page=page, page_size=LOG_PAGE_SIZE)
-        for log in logs:
-            created = _parse_timestamp(log["created_at"])
-            # Newest-first ordering: once we cross the cutoff we're done entirely.
-            if created < cutoff:
-                return totals
-            # Newer than the window (only possible for a past month) -- skip, but
-            # keep scanning back toward the cutoff.
-            if until is not None and created >= until:
-                continue
-            if log.get("deleted"):
-                continue
-            uid = log["user_id"]
-            if uid not in totals:
-                # First (newest) log for this user sets the display name.
-                totals[uid] = [log.get("user_display_name", "Unknown"), 0.0]
-            totals[uid][1] += log["score"]
-        # A short/empty page is the end of the log history.
-        if len(logs) < LOG_PAGE_SIZE:
-            break
+    async for log in _logs_in_window(bot, contest_id, cutoff, until):
+        uid = log["user_id"]
+        if uid not in totals:
+            # First (newest) log for this user sets the display name.
+            totals[uid] = [log.get("user_display_name", "Unknown"), 0.0]
+        totals[uid][1] += log["score"]
     return totals
+
+
+def _log_title(log: dict) -> str:
+    """A log's material title for display: its description on one line, or
+    "Untitled" when the logger left it blank."""
+    return " ".join((log.get("description") or "").split()) or "Untitled"
+
+
+async def _tally_day(
+    bot: commands.Bot, contest_id: str, start: datetime, end: datetime
+) -> dict[str, dict]:
+    """Tally each participant's logs in ``[start, end)``, with a per-title breakdown.
+
+    Returns ``{user_id: {"name", "score", "titles"}}``. ``titles`` maps a
+    casefolded title to ``[title, points]`` so repeat logs of the same material
+    (common: several sittings of one manga in a day) collapse into one line with
+    their points summed. The display spellings -- of the person's name and each
+    title -- come from the newest log, like ``_tally_scores_since``.
+    """
+    people: dict[str, dict] = {}
+    async for log in _logs_in_window(bot, contest_id, start, end):
+        person = people.setdefault(
+            log["user_id"],
+            {"name": log.get("user_display_name", "Unknown"), "score": 0.0, "titles": {}},
+        )
+        title = _log_title(log)
+        person["titles"].setdefault(title.casefold(), [title, 0.0])[1] += log["score"]
+        person["score"] += log["score"]
+    return people
 
 
 def _rank_by_score(totals: dict[str, list]) -> list[dict]:
@@ -444,6 +487,67 @@ async def build_period_leaderboard_card(
         note_title=note_title,
         note_body=note_body,
         accent="purple",
+    )
+    return contest, card
+
+
+def _slack_call_out(top_name: str, top_score: float, others: list[dict]) -> str:
+    """The "everyone else, pick up the slack" line under the top logger's card.
+
+    Always opens with the call to pick up the slack, then backs it with the
+    sharpest thing that is actually true of the day: the top logger was the only
+    one who logged, out-logged everyone else put together, or simply set the pace.
+    """
+    if not others:
+        return f"Pick up the slack! {top_name} was the only one who logged anything."
+    rest_total = sum(person["score"] for person in others)
+    if top_score > rest_total:
+        count = len(others)
+        return f"Pick up the slack! {top_name} out-logged the other {count} of you combined."
+    return f"Pick up the slack! {top_name} set the pace — the rest of you have catching up to do."
+
+
+async def build_daily_top_card(
+    bot: commands.Bot, guild_id: Optional[int], *, day_start: datetime
+) -> tuple[dict, Optional[daily_card.DailyTopCard]]:
+    """Resolve the guild's contest and spotlight the day's top logger.
+
+    Tallies the logs made in the 24 hours from ``day_start`` (a UTC midnight --
+    tadoku.app's own day boundary) and builds the card for whoever earned the most
+    points: their Discord avatar (if they've claimed their tadoku name), their
+    name, the day's total, every title they logged with its points (most first),
+    and a call-out telling everyone else to pick up the slack. A tie for the top
+    goes to the name that sorts first, so the pick is stable across retries.
+
+    Mirrors ``build_period_leaderboard_card``'s contract: returns
+    ``(contest, card)`` with ``card=None`` when nobody earned points that day, and
+    raises ``tadoku.TadokuAPIError`` if resolving the contest or reading logs fails.
+    """
+    contest = await _resolve_contest(bot, guild_id)
+    day_end = day_start + timedelta(days=1)
+    people = await _tally_day(bot, contest["id"], day_start, day_end)
+
+    ranked = sorted(
+        people.values(), key=lambda person: (-person["score"], _normalize_name(person["name"]))
+    )
+    if not ranked or ranked[0]["score"] <= 0:
+        return contest, None
+    top, others = ranked[0], ranked[1:]
+
+    titles = sorted(top["titles"].values(), key=lambda row: (-row[1], row[0].casefold()))
+    hero = {"name": top["name"]}
+    await _attach_avatars(bot, guild_id, [hero])
+
+    loggers = len(ranked)
+    card = daily_card.DailyTopCard(
+        name=top["name"],
+        score=top["score"],
+        titles=[(title, points) for title, points in titles],
+        date_label=f"{day_start:%A}, {day_start:%B} {day_start.day}, {day_start.year}",
+        note_title="Everyone else",
+        note_body=_slack_call_out(top["name"], top["score"], others),
+        footer=f"{contest['title']} · {loggers} {'person' if loggers == 1 else 'people'} logged",
+        avatar=hero.get("avatar"),
     )
     return contest, card
 

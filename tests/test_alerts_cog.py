@@ -3,7 +3,7 @@
 The tadoku-facing card build is covered in test_leaderboard_cog.py, so here we
 monkeypatch ``build_period_leaderboard_card`` / ``build_yearend_card`` (and stub
 the image renderer) and focus on the alert-specific logic: period/window
-computation, the ``/alerts`` on/off/status toggle (which drives all three kinds),
+computation, the ``/alerts`` on/off/status toggle (which drives every kind),
 and the scheduler's "post once per period, retry on API error, tolerate a bad
 channel" behaviour. Cog callbacks are invoked directly with a fake interaction;
 the scheduler is driven through ``_run_due_alerts`` / ``_maybe_post`` / ``_post``
@@ -20,6 +20,7 @@ import pytest
 import cogs.alerts as alerts_cog
 import cogs.leaderboard as leaderboard_cog
 import lib.config_store as config_store
+import lib.daily_card as daily_card
 import lib.leaderboard_card as leaderboard_card
 import lib.tadoku_client as tadoku_client
 from tests.conftest import make_interaction
@@ -50,8 +51,9 @@ def _http_error():
 
 @pytest.fixture(autouse=True)
 def _stub_render(monkeypatch):
-    """Stub the (Pillow) card renderer so alert tests never draw real PNGs."""
+    """Stub the (Pillow) card renderers so alert tests never draw real PNGs."""
     monkeypatch.setattr(leaderboard_card, "render", AsyncMock(return_value=b"PNGDATA"))
+    monkeypatch.setattr(daily_card, "render", AsyncMock(return_value=b"DAILYPNG"))
 
 
 @pytest.fixture
@@ -65,6 +67,23 @@ def patched_card(monkeypatch):
 # ---------------------------------------------------------------------------
 # _period_key / _window_for
 # ---------------------------------------------------------------------------
+
+
+def test_period_key_daily_uses_the_calendar_date():
+    now = datetime(2026, 9, 14, 0, 0, tzinfo=timezone.utc)
+    assert alerts_cog._period_key("daily", now) == [2026, 9, 14]
+
+
+@pytest.mark.parametrize("now, expected", [
+    (datetime(2026, 9, 14, 0, 0, tzinfo=timezone.utc), datetime(2026, 9, 13, tzinfo=timezone.utc)),
+    (datetime(2026, 9, 14, 23, 59, tzinfo=timezone.utc), datetime(2026, 9, 13, tzinfo=timezone.utc)),
+    (datetime(2026, 3, 1, 0, 0, tzinfo=timezone.utc), datetime(2026, 2, 28, tzinfo=timezone.utc)),
+    (datetime(2027, 1, 1, 0, 0, tzinfo=timezone.utc), datetime(2026, 12, 31, tzinfo=timezone.utc)),
+    # A non-UTC moment is placed on tadoku's UTC calendar first (15:00 JST = 06:00 UTC).
+    (datetime(2026, 9, 14, 15, 0, tzinfo=timezone(timedelta(hours=9))), datetime(2026, 9, 13, tzinfo=timezone.utc)),
+])
+def test_previous_day_start_is_the_utc_day_that_just_ended(now, expected):
+    assert alerts_cog._previous_day_start(now) == expected
 
 
 def test_period_key_weekly_uses_iso_year_week():
@@ -403,3 +422,123 @@ async def test_post_handles_a_missing_channel():
     cog = alerts_cog.Alerts(bot)
 
     await cog._post(999, 555, b"PNGDATA")  # must not raise
+
+
+# ---------------------------------------------------------------------------
+# scheduler: the daily top-logger alert
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def patched_daily(monkeypatch):
+    """Make build_daily_top_card return a ready card by default."""
+    daily = daily_card.DailyTopCard(
+        name="ruby", score=1.0, titles=[], date_label="d", note_body="n", footer="f"
+    )
+    builder = AsyncMock(return_value=(CONTEST, daily))
+    monkeypatch.setattr(leaderboard_cog, "build_daily_top_card", builder)
+    return builder
+
+
+async def test_maybe_post_daily_posts_yesterdays_top_logger_card(patched_daily, patched_card):
+    channel = _fake_channel(cid=555)
+    bot = _bot_with_channel(channel)
+    config_store.set_guild_alert(999, "daily", enabled=True, channel_id=555, last_period=[2026, 9, 13])
+    cog = alerts_cog.Alerts(bot)
+    now = datetime(2026, 9, 14, 0, 0, 5, tzinfo=timezone.utc)
+
+    await cog._maybe_post(999, "daily", now)
+
+    patched_daily.assert_awaited_once_with(bot, 999, day_start=datetime(2026, 9, 13, tzinfo=timezone.utc))
+    patched_card.assert_not_awaited()
+    # Rendered with the daily card renderer, not the leaderboard one.
+    daily_card.render.assert_awaited_once()
+    leaderboard_card.render.assert_not_awaited()
+    sent = channel.send.await_args.kwargs["file"]
+    assert sent.filename == "top-logger.png"
+    assert config_store.get_guild_alert(999, "daily")["last_period"] == [2026, 9, 14]
+
+
+async def test_maybe_post_daily_skips_a_day_already_posted(patched_daily):
+    channel = _fake_channel(cid=555)
+    bot = _bot_with_channel(channel)
+    config_store.set_guild_alert(999, "daily", enabled=True, channel_id=555, last_period=[2026, 9, 14])
+    cog = alerts_cog.Alerts(bot)
+
+    await cog._maybe_post(999, "daily", datetime(2026, 9, 14, 13, tzinfo=timezone.utc))
+
+    patched_daily.assert_not_awaited()
+    channel.send.assert_not_awaited()
+
+
+async def test_maybe_post_daily_marks_done_when_nobody_logged(monkeypatch):
+    monkeypatch.setattr(leaderboard_cog, "build_daily_top_card", AsyncMock(return_value=(CONTEST, None)))
+    channel = _fake_channel(cid=555)
+    bot = _bot_with_channel(channel)
+    config_store.set_guild_alert(999, "daily", enabled=True, channel_id=555, last_period=[2026, 9, 13])
+    cog = alerts_cog.Alerts(bot)
+
+    await cog._maybe_post(999, "daily", datetime(2026, 9, 14, tzinfo=timezone.utc))
+
+    channel.send.assert_not_awaited()
+    assert config_store.get_guild_alert(999, "daily")["last_period"] == [2026, 9, 14]
+
+
+async def test_maybe_post_daily_retries_after_an_api_error(monkeypatch):
+    monkeypatch.setattr(
+        leaderboard_cog, "build_daily_top_card",
+        AsyncMock(side_effect=tadoku_client.TadokuAPIError("boom")),
+    )
+    channel = _fake_channel(cid=555)
+    bot = _bot_with_channel(channel)
+    config_store.set_guild_alert(999, "daily", enabled=True, channel_id=555, last_period=[2026, 9, 13])
+    cog = alerts_cog.Alerts(bot)
+
+    await cog._maybe_post(999, "daily", datetime(2026, 9, 14, tzinfo=timezone.utc))
+
+    channel.send.assert_not_awaited()
+    assert config_store.get_guild_alert(999, "daily")["last_period"] == [2026, 9, 13]
+
+
+async def test_maybe_post_never_posted_kind_starts_at_its_next_boundary(patched_daily):
+    channel = _fake_channel(cid=555)
+    bot = _bot_with_channel(channel)
+    config_store.set_guild_alert(999, "daily", enabled=True, channel_id=555)  # no last_period
+    cog = alerts_cog.Alerts(bot)
+    now = datetime(2026, 9, 14, 15, tzinfo=timezone.utc)
+
+    await cog._maybe_post(999, "daily", now)
+
+    # Seeded instead of posted, so nobody gets a surprise recap mid-afternoon.
+    patched_daily.assert_not_awaited()
+    channel.send.assert_not_awaited()
+    assert config_store.get_guild_alert(999, "daily")["last_period"] == [2026, 9, 14]
+
+
+async def test_existing_alerts_pick_up_the_daily_post_without_rerunning_alerts_on(
+    patched_daily, patched_card
+):
+    # A server that turned alerts on before the daily kind existed: only weekly
+    # (and friends) are stored. Daily follows that switch and channel.
+    channel = _fake_channel(cid=555)
+    bot = _bot_with_channel(channel)
+    config_store.set_guild_alert(999, "weekly", enabled=True, channel_id=555, last_period=[2026, 38])
+    cog = alerts_cog.Alerts(bot)
+
+    # First tick after deploy: daily is seeded, nothing is posted.
+    await cog._run_due_alerts(datetime(2026, 9, 14, 15, tzinfo=timezone.utc))
+    channel.send.assert_not_awaited()
+
+    # Next midnight: the day that just ended gets its top-logger card.
+    await cog._run_due_alerts(datetime(2026, 9, 15, 0, tzinfo=timezone.utc))
+    patched_daily.assert_awaited_once_with(bot, 999, day_start=datetime(2026, 9, 14, tzinfo=timezone.utc))
+    channel.send.assert_awaited_once()
+
+
+async def test_alerts_off_stops_the_daily_post_too(fake_bot):
+    config_store.set_guild_alert(999, "weekly", enabled=True, channel_id=555)
+    cog = alerts_cog.Alerts(fake_bot)
+
+    await cog.alerts_off.callback(cog, _guild_interaction())
+
+    assert config_store.get_guild_alert(999, "daily")["enabled"] is False

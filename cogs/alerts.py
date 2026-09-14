@@ -1,8 +1,11 @@
-"""Alerts cog: automatic end-of-week / month / year leaderboard posts.
+"""Alerts cog: automatic end-of-day / week / month / year leaderboard posts.
 
-One ``/alerts`` command group (Manage Server) turns all three alerts on or off
+One ``/alerts`` command group (Manage Server) turns all four alerts on or off
 together and picks the single channel they post to:
 
+  * **daily**   -- a spotlight card on the day's top logger (their avatar, name,
+    points and every title they logged) telling everyone else to pick up the
+    slack, at the end of each day.
   * **weekly**  -- the last-7-days ranking, at the start of each week (Monday).
   * **monthly** -- the just-ended month's ranking, on the 1st.
   * **yearly**  -- the contest's final cumulative standings with a top-3 podium
@@ -11,15 +14,18 @@ together and picks the single channel they post to:
 A background loop (``check_alerts``) runs every hour **on** the hour, in UTC --
 which is also tadoku.app's clock, so a period rolls over here exactly when the
 site's does. For every guild with alerts enabled, once a calendar period rolls
-over it renders the leaderboard card for that kind (weekly/monthly via
-``build_period_leaderboard_card``; yearly via ``build_yearend_card``) and posts
-the image to the configured channel. The 00:00 tick is the one that normally
+over it renders the card for that kind (daily via ``build_daily_top_card``;
+weekly/monthly via ``build_period_leaderboard_card``; yearly via
+``build_yearend_card``) and posts the image to the configured channel. The 00:00 tick is the one that normally
 fires them, so a wrap-up lands at midnight sharp rather than at whatever minute
 past the hour the bot last started on.
 
 A per-guild, per-kind ``last_period`` marker makes each alert fire exactly once
 per period and survive restarts: if the bot was down (or tadoku.app unreachable)
-when the period rolled over, the next hourly tick still posts it.
+when the period rolled over, the next hourly tick still posts it. A kind that has
+never posted (``last_period`` unset -- e.g. the daily alert on a server whose
+alerts were on before it existed) starts from its next boundary instead of
+posting straight away.
 """
 
 import io
@@ -33,6 +39,7 @@ from discord.ext import commands, tasks
 
 import cogs.leaderboard as leaderboard
 import lib.config_store as config_store
+import lib.daily_card as daily_card
 import lib.leaderboard_card as leaderboard_card
 import lib.tadoku_client as tadoku
 from lib.permissions import is_admin
@@ -53,11 +60,14 @@ CHECK_TIMES = [time(hour=hour) for hour in range(24)]
 def _period_key(kind: str, now: datetime) -> list[int]:
     """Identify the calendar period ``now`` falls in for the given alert kind.
 
-    Weekly uses the ISO year+week (so it advances every Monday); monthly uses
-    year+month (advances on the 1st); yearly uses the year alone (advances on
-    Jan 1). Returned as a plain list so it round-trips through JSON and compares
-    by value against the stored ``last_period``.
+    Daily uses the calendar date (advances at midnight); weekly uses the ISO
+    year+week (advances every Monday); monthly uses year+month (advances on the
+    1st); yearly uses the year alone (advances on Jan 1). Returned as a plain list
+    so it round-trips through JSON and compares by value against the stored
+    ``last_period``.
     """
+    if kind == "daily":
+        return [now.year, now.month, now.day]
     if kind == "weekly":
         iso = now.isocalendar()
         return [iso[0], iso[1]]
@@ -87,6 +97,13 @@ def _window_for(kind: str, now: datetime) -> tuple[datetime, Optional[datetime],
     until = datetime(now.year, now.month, 1, tzinfo=timezone.utc)
     label = cutoff.strftime("%B %Y")
     return cutoff, until, label, label
+
+
+def _previous_day_start(now: datetime) -> datetime:
+    """UTC midnight at the start of the day before ``now`` -- the day that just
+    ended when the daily alert fires just after midnight."""
+    now = now.astimezone(timezone.utc)
+    return datetime(now.year, now.month, now.day, tzinfo=timezone.utc) - timedelta(days=1)
 
 
 class Alerts(commands.Cog):
@@ -144,11 +161,25 @@ class Alerts(commands.Cog):
             return
 
         period = _period_key(kind, now)
+        if settings["last_period"] is None:
+            # Never posted: start from the next boundary rather than recapping a
+            # period nobody was told to expect (see the module docstring).
+            config_store.set_guild_alert(guild_id, kind, last_period=period)
+            return
         if settings["last_period"] == period:
-            return  # already handled this week/month/year
+            return  # already handled this day/week/month/year
 
+        render = leaderboard_card.render
+        filename = "leaderboard.png"
         try:
-            if kind == "yearly":
+            if kind == "daily":
+                # The day that just ended: its top logger, not a ranking.
+                _contest, card = await leaderboard.build_daily_top_card(
+                    self.bot, guild_id, day_start=_previous_day_start(now)
+                )
+                render = daily_card.render
+                filename = "top-logger.png"
+            elif kind == "yearly":
                 # Year-end shows the contest's cumulative standings (like
                 # /leaderboard) plus a podium congratulation -- not a windowed tally.
                 _contest, card = await leaderboard.build_yearend_card(self.bot, guild_id)
@@ -170,15 +201,17 @@ class Alerts(commands.Cog):
             return
 
         if card is not None:
-            png = await leaderboard_card.render(card)
-            await self._post(guild_id, settings["channel_id"], png)
+            png = await render(card)
+            await self._post(guild_id, settings["channel_id"], png, filename=filename)
         # Advance the marker whether we posted or there was simply nothing to
         # post, so an empty period doesn't get re-checked every hour.
         config_store.set_guild_alert(guild_id, kind, last_period=period)
 
-    async def _post(self, guild_id: int, channel_id: Optional[int], png: bytes) -> None:
-        """Send the rendered card ``png`` to the configured channel, tolerating a
-        missing channel.
+    async def _post(
+        self, guild_id: int, channel_id: Optional[int], png: bytes, filename: str = "leaderboard.png"
+    ) -> None:
+        """Send the rendered card ``png`` (as ``filename``) to the configured
+        channel, tolerating a missing channel.
 
         A channel that's been deleted or that the bot can no longer see/post to
         is logged and skipped rather than raised -- the wrap-up for that period
@@ -194,7 +227,7 @@ class Alerts(commands.Cog):
                 _log.warning("Wrap-up for guild %s: channel %s not found", guild_id, channel_id)
                 return
         try:
-            await channel.send(file=discord.File(io.BytesIO(png), filename="leaderboard.png"))
+            await channel.send(file=discord.File(io.BytesIO(png), filename=filename))
         except discord.HTTPException:
             _log.warning(
                 "Wrap-up for guild %s: couldn't post to channel %s", guild_id, channel_id
@@ -206,8 +239,8 @@ class Alerts(commands.Cog):
         """Apply the same on/off (+ channel) to every alert kind for a guild.
 
         On enable, each kind's ``last_period`` is seeded to the current period so
-        the first post lands at that kind's *next* boundary (Monday / the 1st /
-        Jan 1) rather than immediately.
+        the first post lands at that kind's *next* boundary (midnight / Monday /
+        the 1st / Jan 1) rather than immediately.
         """
         now = datetime.now(timezone.utc)
         for kind in config_store.ALERT_KINDS:
@@ -227,7 +260,7 @@ class Alerts(commands.Cog):
     # which is static and can't express "OR a named role".
     alerts_group = app_commands.Group(
         name="alerts",
-        description="Automatic end-of-week / month / year leaderboard posts.",
+        description="Automatic end-of-day / week / month / year leaderboard posts.",
         guild_only=True,
     )
 
@@ -237,7 +270,7 @@ class Alerts(commands.Cog):
     async def alerts_on(
         self, interaction: discord.Interaction, channel: Optional[discord.TextChannel] = None
     ):
-        """Enable the weekly, monthly and year-end alerts in one channel."""
+        """Enable the daily, weekly, monthly and year-end alerts in one channel."""
         target = channel or interaction.channel
         # Refuse a channel the bot can't post in, so the admin finds out now
         # rather than from silence at the next boundary.
@@ -249,9 +282,9 @@ class Alerts(commands.Cog):
             return
         self._set_all_alerts(interaction.guild_id, enabled=True, channel_id=target.id)
         await interaction.response.send_message(
-            f"✅ Alerts are **on** in {target.mention}: the weekly wrap-up (Mondays), the monthly "
-            "wrap-up (the 1st), and the year-end recap (Jan 1), all at 00:00 UTC — tadoku.app's "
-            "own day boundary.",
+            f"✅ Alerts are **on** in {target.mention}: the day's top logger (every night), the "
+            "weekly wrap-up (Mondays), the monthly wrap-up (the 1st), and the year-end recap "
+            "(Jan 1), all at 00:00 UTC — tadoku.app's own day boundary.",
             ephemeral=True,
         )
 
@@ -271,7 +304,7 @@ class Alerts(commands.Cog):
         if settings["enabled"] and settings["channel_id"]:
             await interaction.response.send_message(
                 f"Alerts are **on**, posting to <#{settings['channel_id']}> "
-                "(weekly, monthly and year-end).",
+                "(daily top logger, weekly, monthly and year-end).",
                 ephemeral=True,
             )
         else:

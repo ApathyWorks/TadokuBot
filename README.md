@@ -44,26 +44,32 @@ reject unauthorized users with an ephemeral message.
 
 ## Scheduled alerts
 
-`/alerts on channel:#somewhere` opts a server into three automatic posts (all times **UTC**, which is
+`/alerts on channel:#somewhere` opts a server into four automatic posts (all times **UTC**, which is
 also [tadoku.app](https://tadoku.app)'s own clock — the site's contest days roll over at 00:00 UTC
 too), each for that server's current contest — one on/off switch, one channel (defaults to the
 channel you run `/alerts on` in):
 
 | Alert | When | Content |
 | --- | --- | --- |
+| Daily | End of each day (**00:00**) | A **top logger** spotlight for the day that just ended: their Discord avatar, name, points earned that day, and every title they logged with its points — plus a call for everyone else to pick up the slack. |
 | Weekly | Start of each week (**Monday 00:00**) | The rolling last-7-days ranking (same as `/weeklyleaderboard`). |
 | Monthly | The **1st, 00:00** | The just-ended month's ranking (same as `/monthlyleaderboard` for that month). |
 | Year-end | **Jan 1, 00:00** | The contest's final cumulative standings (same as `/leaderboard`), topped with a **top-3 podium congratulation**. |
 
 Each alert is posted as a rendered **image card** (the same one `/weeklyleaderboard`,
-`/monthlyleaderboard` and the year-end recap draw), so the bot needs **Attach Files** permission in
-the chosen channel.
+`/monthlyleaderboard` and the year-end recap draw, plus the daily top-logger card), so the bot needs
+**Attach Files** permission in the chosen channel. The daily card only shows a Discord avatar when the
+top logger has linked their tadoku name with `/claim`; otherwise it draws a placeholder. A day nobody
+logged anything posts nothing.
 
-`/alerts off` disables all three; `/alerts status` shows the current channel. A background task
+`/alerts off` disables all four; `/alerts status` shows the current channel. A background task
 checks every hour **on** the hour and posts each alert at most once per period, so a wrap-up lands at
 midnight sharp — not at whatever minute past the hour the bot last restarted on — and still goes out
 on a later tick if the bot was down at midnight. The bot must be able to post in the chosen
 channel — `/alerts on` refuses one it can't send to.
+
+Servers that turned alerts on before the daily post existed get it automatically, in the same channel,
+starting the next midnight — no need to run `/alerts on` again.
 
 ## Live log feed
 

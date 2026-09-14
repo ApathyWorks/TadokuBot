@@ -186,9 +186,46 @@ def test_guilds_with_alerts_lists_only_configured_guilds():
 
 def test_alert_accessors_reject_unknown_kind():
     with pytest.raises(ValueError):
-        config_store.get_guild_alert(1, "daily")
+        config_store.get_guild_alert(1, "hourly")
     with pytest.raises(ValueError):
-        config_store.set_guild_alert(1, "daily", enabled=True)
+        config_store.set_guild_alert(1, "hourly", enabled=True)
+
+
+def test_daily_alert_follows_the_weekly_switch_until_written():
+    # A guild that turned alerts on before the daily kind existed.
+    config_store.set_guild_alert(1, "weekly", enabled=True, channel_id=42, last_period=[2026, 37])
+
+    assert config_store.get_guild_alert(1, "daily") == {
+        "enabled": True,
+        "channel_id": 42,
+        "last_period": None,  # never inherited: each kind tracks its own period
+    }
+
+
+def test_daily_alert_keeps_following_after_only_its_period_is_written():
+    config_store.set_guild_alert(1, "weekly", enabled=True, channel_id=42)
+    config_store.set_guild_alert(1, "daily", last_period=[2026, 9, 14])
+
+    assert config_store.get_guild_alert(1, "daily") == {
+        "enabled": True,
+        "channel_id": 42,
+        "last_period": [2026, 9, 14],
+    }
+
+
+def test_daily_alerts_own_settings_override_the_weekly_switch():
+    config_store.set_guild_alert(1, "weekly", enabled=True, channel_id=42)
+    config_store.set_guild_alert(1, "daily", enabled=False, channel_id=7)
+
+    assert config_store.get_guild_alert(1, "daily")["enabled"] is False
+    assert config_store.get_guild_alert(1, "daily")["channel_id"] == 7
+    assert config_store.get_guild_alert(1, "weekly")["enabled"] is True
+
+
+def test_daily_alert_is_off_when_nothing_is_configured():
+    assert config_store.get_guild_alert(1, "daily") == {
+        "enabled": False, "channel_id": None, "last_period": None,
+    }
 
 
 def test_set_alert_rejects_unknown_field():
