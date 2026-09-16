@@ -433,7 +433,7 @@ async def test_post_handles_a_missing_channel():
 def patched_daily(monkeypatch):
     """Make build_daily_top_card return a ready card by default."""
     daily = daily_card.DailyTopCard(
-        name="ruby", score=1.0, titles=[], date_label="d", note_body="n", footer="f"
+        name="ruby", score=1.0, titles=[], date_label="d", footer="f"
     )
     builder = AsyncMock(return_value=(CONTEST, daily))
     monkeypatch.setattr(leaderboard_cog, "build_daily_top_card", builder)

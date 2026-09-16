@@ -1022,8 +1022,6 @@ async def test_daily_card_spotlights_the_top_scorer_with_their_titles(fake_bot):
     # Repeat logs of a title collapse into one line; most points first.
     assert card.titles == [("呪術廻戦", 35.0), ("Summer Pockets", 12.0)]
     assert card.date_label == "Sunday, September 13, 2026"
-    assert card.note_title == "Everyone else"
-    assert card.note_body.startswith("Pick up the slack!")
     assert card.footer == "2026 Round 4 · 2 people logged"
 
 
@@ -1080,35 +1078,12 @@ async def test_daily_card_breaks_a_tie_by_name_so_retries_agree(fake_bot):
     assert card.name == "Alpha"
 
 
-async def test_daily_call_out_when_the_top_logger_was_alone(fake_bot):
+async def test_daily_card_footer_is_singular_when_one_person_logged(fake_bot):
     _serve_day(_day_log("u1", "ruby", 20, 10))
 
     _contest, card = await leaderboard_cog.build_daily_top_card(fake_bot, 999, day_start=DAY)
 
-    assert card.note_body == "Pick up the slack! ruby was the only one who logged anything."
     assert card.footer.endswith("1 person logged")
-
-
-async def test_daily_call_out_when_the_top_logger_beat_everyone_combined(fake_bot):
-    _serve_day(
-        _day_log("u1", "ruby", 50, 10), _day_log("u2", "ryun", 20, 10), _day_log("u3", "anja", 10, 10),
-    )
-
-    _contest, card = await leaderboard_cog.build_daily_top_card(fake_bot, 999, day_start=DAY)
-
-    assert card.note_body == "Pick up the slack! ruby out-logged the other 2 of you combined."
-
-
-async def test_daily_call_out_when_the_rest_together_outscored_the_top(fake_bot):
-    _serve_day(
-        _day_log("u1", "ruby", 30, 10), _day_log("u2", "ryun", 20, 10), _day_log("u3", "anja", 20, 10),
-    )
-
-    _contest, card = await leaderboard_cog.build_daily_top_card(fake_bot, 999, day_start=DAY)
-
-    # "out-logged ... combined" would be false here, so the line only claims the pace.
-    assert "combined" not in card.note_body
-    assert card.note_body.startswith("Pick up the slack! ruby set the pace")
 
 
 async def test_daily_card_attaches_the_claimed_top_loggers_avatar(fake_bot):

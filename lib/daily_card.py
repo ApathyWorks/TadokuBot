@@ -4,8 +4,8 @@ Posted by the daily alert (``cogs.alerts``) for the tadoku day that just ended.
 Same dark theme as the leaderboard card, with a gold accent: a hero block with
 the day's top logger's Discord avatar (a placeholder disc when they aren't
 claimed), their name and the points they earned that day, then every title they
-logged with the points it earned, and a call-out telling everyone else to pick
-up the slack. A footer line carries the contest name and how many people logged.
+logged with the points it earned. A footer line carries the contest name and how
+many people logged.
 
 Everything is authored in logical pixels, drawn at ``SCALE``x and downsampled to
 ``ZOOM``x -- the same geometry pipeline as ``lib.leaderboard_card``, so the two
@@ -21,9 +21,9 @@ from typing import Optional
 
 from PIL import Image, ImageChops, ImageDraw
 
-from lib.leaderboard_card import GOLD, MARGIN, SCALE, WIDTH, ZOOM, _wrap
+from lib.leaderboard_card import GOLD, MARGIN, SCALE, WIDTH, ZOOM
 from lib.profile_card import (
-    BG, HAIRLINE, INK, INK_SOFT, PANEL_BG,
+    BG, HAIRLINE, INK, INK_SOFT,
     _circular_avatar, _font, _oneline, _truncate,
 )
 
@@ -47,17 +47,14 @@ class DailyTopCard:
     it, most points first); past ``MAX_TITLE_ROWS`` the tail is summarised.
     ``avatar`` is the top logger's Discord avatar bytes, or ``None`` for a
     placeholder disc. ``date_label`` names the day covered (e.g. "Sunday,
-    September 13, 2026"); ``note_title`` + ``note_body`` are the pick-up-the-slack
-    call-out; ``footer`` carries the contest name and logger count.
+    September 13, 2026"); ``footer`` carries the contest name and logger count.
     """
     name: str
     score: float
     titles: list[tuple[str, float]]
     date_label: str
-    note_body: str
     footer: str
     avatar: Optional[bytes] = None
-    note_title: Optional[str] = None
 
 
 def _points(value: float) -> str:
@@ -96,11 +93,7 @@ def _render(card: DailyTopCard) -> bytes:
     section_font = _font(15 * S, bold=True)
     title_font = _font(22 * S)
     title_points_font = _font(22 * S, bold=True)
-    note_title_font = _font(15 * S, bold=True)
-    note_body_font = _font(21 * S)
     footer_font = _font(16 * S)
-
-    measure = ImageDraw.Draw(Image.new("RGB", (1, 1)))
 
     # -- layout pass: stack the blocks top to bottom so the canvas height fits. --
     kicker_y = MARGIN
@@ -112,14 +105,6 @@ def _render(card: DailyTopCard) -> bytes:
     rows = _title_rows(card.titles)
     rows_y = section_y + 30
     y = rows_y + len(rows) * TITLE_ROW_H + 14
-
-    pad = 18
-    body_max = (right - content_x - 2 * pad - 8) * S
-    note_lines = _wrap(measure, card.note_body, note_body_font, body_max)
-    note_title_h = 26 if card.note_title else 0
-    note_h = 2 * pad + note_title_h + len(note_lines) * 30
-    note_y = y
-    y += note_h + 14
 
     footer_y = y + 2
     total_h = footer_y + 22 + MARGIN
@@ -174,21 +159,6 @@ def _render(card: DailyTopCard) -> bytes:
         label_max = right * S - content_x * S - points_w - 24 * S
         draw.text((content_x * S, mid), _truncate(draw, _oneline(label), title_font, label_max),
                   font=title_font, fill=ink, anchor="lm")
-
-    # Call-out: everyone else, pick up the slack.
-    draw.rounded_rectangle((content_x * S, note_y * S, right * S, (note_y + note_h) * S),
-                           radius=12 * S, fill=PANEL_BG, outline=HAIRLINE, width=S)
-    draw.rounded_rectangle((content_x * S, note_y * S, (content_x + 6) * S, (note_y + note_h) * S),
-                           radius=3 * S, fill=GOLD)
-    tx = content_x + pad + 8
-    ty = note_y + pad
-    if card.note_title:
-        draw.text((tx * S, ty * S), _oneline(card.note_title).upper(),
-                  font=note_title_font, fill=INK_SOFT, anchor="la")
-        ty += note_title_h
-    for line in note_lines:
-        draw.text((tx * S, ty * S), line, font=note_body_font, fill=INK, anchor="la")
-        ty += 30
 
     draw.text((content_x * S, footer_y * S), _truncate(draw, _oneline(card.footer), footer_font,
               (right - content_x) * S), font=footer_font, fill=INK_SOFT, anchor="la")

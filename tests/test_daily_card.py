@@ -21,8 +21,6 @@ def _card(titles=None, **overrides):
         score=sum(points for _, points in titles) if titles else 42.0,
         titles=titles if titles is not None else [("Summer Pockets", 42.0)],
         date_label="Sunday, September 13, 2026",
-        note_title="Everyone else",
-        note_body="Pick up the slack! ruby was the only one who logged anything.",
         footer="2026 Round 5 · 1 person logged",
     )
     fields.update(overrides)
@@ -80,12 +78,6 @@ def test_points_format_matches_the_leaderboards():
     assert daily_card._points(7) == "7.0"
 
 
-def test_a_longer_call_out_wraps_onto_more_lines():
-    short = _card(note_body="Pick up the slack!")
-    long = _card(note_body="Pick up the slack! " + "The rest of you have catching up to do. " * 6)
-    assert _dims(long)[1] > _dims(short)[1]
-
-
 def test_renders_cjk_long_titles_and_a_real_avatar_without_error():
     buf = io.BytesIO()
     Image.new("RGB", (64, 64), (200, 120, 90)).save(buf, "PNG")
@@ -93,7 +85,6 @@ def test_renders_cjk_long_titles_and_a_real_avatar_without_error():
         titles=[("呪術廻戦", 412.0), ("A light novel title far too long to fit on one row of the card " * 3, 5.0)],
         name="涼宮ハルヒ but with an absurdly long display name that has to be truncated",
         avatar=buf.getvalue(),
-        note_title=None,
     )
     w, h = _dims(card)
     assert w == round(leaderboard_card.WIDTH * leaderboard_card.ZOOM) and h > 0

@@ -491,22 +491,6 @@ async def build_period_leaderboard_card(
     return contest, card
 
 
-def _slack_call_out(top_name: str, top_score: float, others: list[dict]) -> str:
-    """The "everyone else, pick up the slack" line under the top logger's card.
-
-    Always opens with the call to pick up the slack, then backs it with the
-    sharpest thing that is actually true of the day: the top logger was the only
-    one who logged, out-logged everyone else put together, or simply set the pace.
-    """
-    if not others:
-        return f"Pick up the slack! {top_name} was the only one who logged anything."
-    rest_total = sum(person["score"] for person in others)
-    if top_score > rest_total:
-        count = len(others)
-        return f"Pick up the slack! {top_name} out-logged the other {count} of you combined."
-    return f"Pick up the slack! {top_name} set the pace — the rest of you have catching up to do."
-
-
 async def build_daily_top_card(
     bot: commands.Bot, guild_id: Optional[int], *, day_start: datetime
 ) -> tuple[dict, Optional[daily_card.DailyTopCard]]:
@@ -515,9 +499,9 @@ async def build_daily_top_card(
     Tallies the logs made in the 24 hours from ``day_start`` (a UTC midnight --
     tadoku.app's own day boundary) and builds the card for whoever earned the most
     points: their Discord avatar (if they've claimed their tadoku name), their
-    name, the day's total, every title they logged with its points (most first),
-    and a call-out telling everyone else to pick up the slack. A tie for the top
-    goes to the name that sorts first, so the pick is stable across retries.
+    name, the day's total, and every title they logged with its points (most
+    first). A tie for the top goes to the name that sorts first, so the pick is
+    stable across retries.
 
     Mirrors ``build_period_leaderboard_card``'s contract: returns
     ``(contest, card)`` with ``card=None`` when nobody earned points that day, and
@@ -532,7 +516,7 @@ async def build_daily_top_card(
     )
     if not ranked or ranked[0]["score"] <= 0:
         return contest, None
-    top, others = ranked[0], ranked[1:]
+    top = ranked[0]
 
     titles = sorted(top["titles"].values(), key=lambda row: (-row[1], row[0].casefold()))
     hero = {"name": top["name"]}
@@ -544,8 +528,6 @@ async def build_daily_top_card(
         score=top["score"],
         titles=[(title, points) for title, points in titles],
         date_label=f"{day_start:%A}, {day_start:%B} {day_start.day}, {day_start.year}",
-        note_title="Everyone else",
-        note_body=_slack_call_out(top["name"], top["score"], others),
         footer=f"{contest['title']} · {loggers} {'person' if loggers == 1 else 'people'} logged",
         avatar=hero.get("avatar"),
     )
