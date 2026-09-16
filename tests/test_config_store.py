@@ -267,6 +267,7 @@ def test_get_guild_logfeed_defaults_when_unset():
         "enabled": False,
         "channel_id": None,
         "last_seen": None,
+        "rank_snapshot": None,
     }
 
 
@@ -277,6 +278,7 @@ def test_set_and_get_logfeed_round_trip():
         "enabled": True,
         "channel_id": 42,
         "last_seen": "2026-07-05T20:00:00Z",
+        "rank_snapshot": None,
     }
 
 
@@ -289,7 +291,14 @@ def test_set_logfeed_merges_partial_updates():
         "enabled": True,
         "channel_id": 42,
         "last_seen": "2026-07-05T21:00:00Z",
+        "rank_snapshot": None,
     }
+
+
+def test_logfeed_rank_snapshot_round_trips():
+    snap = {"contest_id": "c1", "ranks": {"u1": 1, "u2": 2}}
+    config_store.set_guild_logfeed(1, rank_snapshot=snap)
+    assert config_store.get_guild_logfeed(1)["rank_snapshot"] == snap
 
 
 def test_logfeed_preserves_contest_and_alerts():

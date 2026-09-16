@@ -230,7 +230,7 @@ def guilds_with_alerts() -> list[int]:
 # Live log feed (the /log command)
 # ---------------------------------------------------------------------------
 
-_LOGFEED_FIELDS = {"enabled", "channel_id", "last_seen"}
+_LOGFEED_FIELDS = {"enabled", "channel_id", "last_seen", "rank_snapshot"}
 
 
 def get_guild_logfeed(guild_id: int) -> dict:
@@ -241,6 +241,9 @@ def get_guild_logfeed(guild_id: int) -> dict:
       * ``last_seen``  -- the ``created_at`` of the newest log already posted (an
         ISO-8601 string), or ``None`` if never. The poller posts only logs newer
         than this, so it never repeats or dumps a backlog.
+      * ``rank_snapshot`` -- the last-seen leaderboard positions, used to detect
+        rank-change callouts: ``{"contest_id": id, "ranks": {user_id: rank}}`` for
+        the top slice, or ``None`` if never captured (or the pinned contest changed).
     """
     entry = _read().get(str(guild_id)) or {}
     settings = entry.get("logfeed") or {}
@@ -248,16 +251,18 @@ def get_guild_logfeed(guild_id: int) -> dict:
         "enabled": settings.get("enabled", False),
         "channel_id": settings.get("channel_id"),
         "last_seen": settings.get("last_seen"),
+        "rank_snapshot": settings.get("rank_snapshot"),
     }
 
 
 def set_guild_logfeed(guild_id: int, **fields) -> None:
     """Update some of a guild's log-feed settings, leaving the rest as-is.
 
-    Accepts any of ``enabled`` / ``channel_id`` / ``last_seen`` and merges them
-    into the stored settings, preserving the guild's other keys (contest, shame,
-    alerts). This partial shape lets the poller bump only ``last_seen`` without
-    touching the admin's ``enabled``/``channel_id`` choices.
+    Accepts any of ``enabled`` / ``channel_id`` / ``last_seen`` / ``rank_snapshot``
+    and merges them into the stored settings, preserving the guild's other keys
+    (contest, shame, alerts). This partial shape lets the poller bump only
+    ``last_seen`` / ``rank_snapshot`` without touching the admin's
+    ``enabled``/``channel_id`` choices.
     """
     unknown = set(fields) - _LOGFEED_FIELDS
     if unknown:

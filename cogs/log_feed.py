@@ -17,6 +17,12 @@ A ``youtube``-tagged log whose description contains URL(s) also gets them posted
 as a follow-up message beneath the card, so Discord renders a playable preview
 for each.
 
+After the logs, the poller posts a **"moved up" card** (see ``lib.rank_card``) for
+anyone those logs pushed up the contest's top ``RANK_CALLOUT_DEPTH`` — overtaking
+a rival, or breaking into the slice from below. It compares the live top slice
+against a per-guild snapshot from the previous poll; the first baseline (or a
+change of pinned contest) only seeds the snapshot, so no stale callouts fire.
+
 The poller keeps a per-guild ``last_seen`` high-water mark (the ``created_at`` of
 the newest log already posted) so it never repeats a log or dumps a backlog: on
 enable the mark is seeded to "now", and each poll posts only logs newer than it.
@@ -37,6 +43,7 @@ import cogs.leaderboard as leaderboard
 import lib.config_store as config_store
 import lib.poster_client as poster_client
 import lib.profile_card as profile_card
+import lib.rank_card as rank_card
 import lib.tadoku_client as tadoku
 from lib.permissions import is_admin
 
@@ -61,6 +68,12 @@ MAX_POSTS_PER_POLL = 20
 # stats. 50 x 100 = 5,000 logs covers any realistic member; it just bounds the
 # pathological case (and the cost, since this runs per claimed logger).
 CONTEST_LOG_MAX_PAGES = 50
+
+# Rank-change callouts: how deep into the leaderboard a move is worth announcing
+# (a pass or a break-in below this rank isn't news), and a per-poll cap so a big
+# reshuffle can't flood the channel with "moved up" cards.
+RANK_CALLOUT_DEPTH = 20
+MAX_RANK_CALLOUTS = 3
 
 # Emoji per activity name, with a neutral fallback.
 _ACTIVITY_EMOJI = {"Reading": "📖", "Listening": "🎧"}
@@ -231,6 +244,42 @@ def _claimer_id(claims: dict[str, str], name: str) -> Optional[int]:
         if leaderboard._normalize_name(claimed) == target:
             return int(uid)
     return None
+
+
+def _rank_callouts(entries: list[dict], old_ranks: dict, logger_ids: set, depth: int) -> list[dict]:
+    """The top-slice entries a poll's logs pushed up, each with a "what they did" note.
+
+    ``entries`` is the current top slice (rank order); ``old_ranks`` maps user id
+    to previous rank in that slice; ``logger_ids`` are the people who logged this
+    poll; ``depth`` is the slice size (for the "broke into the top N" wording). A
+    mover is an entry that logged this poll and either climbed (new rank below its
+    old one) or is newly in the slice (no old rank). Returns them as entry dicts
+    with an added ``description``, best move (lowest new rank) first.
+    """
+    by_rank = {entry["rank"]: entry for entry in entries}
+    movers = []
+    for entry in entries:
+        uid = entry.get("user_id")
+        if uid not in logger_ids:
+            continue
+        new_rank = entry["rank"]
+        old_rank = old_ranks.get(uid)
+        if old_rank is None:
+            description = f"Broke into the top {depth}"
+        elif new_rank < old_rank:
+            passed = old_rank - new_rank
+            below = by_rank.get(new_rank + 1)  # the rival now directly beneath them
+            if below is None:
+                description = f"Climbed {passed} place{'s' if passed != 1 else ''}"
+            elif passed == 1:
+                description = f"Passed {below['user_display_name']}"
+            else:
+                description = f"Passed {below['user_display_name']} and {passed - 1} other{'s' if passed - 1 != 1 else ''}"
+        else:
+            continue  # same rank or dropped -> not news
+        movers.append({**entry, "description": description})
+    movers.sort(key=lambda entry: entry["rank"])
+    return movers
 
 
 # First http(s) URL in a string (stops at whitespace).
@@ -407,7 +456,65 @@ class LogFeed(commands.Cog):
                 content=f"…and {overflow} more log(s) in the last few minutes.",
             )
 
+        # After the logs, spotlight anyone those logs pushed up the leaderboard.
+        await self._post_rank_changes(
+            guild_id, contest, new_logs, settings, claims, avatar_cache
+        )
+
         config_store.set_guild_logfeed(guild_id, last_seen=newest_created_at)
+
+    async def _post_rank_changes(
+        self, guild_id, contest, new_logs, settings, claims, avatar_cache
+    ) -> None:
+        """Post a "moved up" card for anyone this poll's logs pushed up the top slice.
+
+        Compares the contest's current top ``RANK_CALLOUT_DEPTH`` against the
+        snapshot kept from the previous poll. A logger from this poll who climbed
+        past a rival -- or broke into the slice from below -- gets one card, capped
+        at ``MAX_RANK_CALLOUTS`` (best moves first). The first baseline (or a change
+        of pinned contest) only seeds the snapshot, with no callouts. A lookup
+        failure is swallowed so a hiccup here never disturbs the log feed itself.
+        """
+        logger_ids = {log.get("user_id") for log in new_logs if log.get("user_id")}
+        if not logger_ids:
+            return
+        try:
+            data = await tadoku.get_contest_leaderboard(
+                self.bot.session, contest["id"], page=0, page_size=RANK_CALLOUT_DEPTH
+            )
+        except tadoku.TadokuAPIError:
+            _log.warning("Log feed for guild %s: rank-change lookup failed", guild_id)
+            return
+
+        entries = data.get("entries", [])
+        new_ranks = {entry["user_id"]: entry["rank"] for entry in entries if entry.get("user_id")}
+        snapshot = settings.get("rank_snapshot") or {}
+        # Only compare against a snapshot for the *same* contest; otherwise seed.
+        old_ranks = snapshot["ranks"] if snapshot.get("contest_id") == contest["id"] else None
+        config_store.set_guild_logfeed(
+            guild_id, rank_snapshot={"contest_id": contest["id"], "ranks": new_ranks}
+        )
+        if old_ranks is None:
+            return
+
+        for entry in _rank_callouts(entries, old_ranks, logger_ids, RANK_CALLOUT_DEPTH)[:MAX_RANK_CALLOUTS]:
+            claimer = _claimer_id(claims, entry["user_display_name"])
+            avatar = await self._avatar_bytes_for_id(claimer, avatar_cache) if claimer is not None else None
+            card = rank_card.RankChangeCard(
+                name=entry["user_display_name"],
+                rank=entry["rank"],
+                description=entry["description"],
+                footer=contest["title"],
+                avatar=avatar,
+            )
+            try:
+                png = await rank_card.render(card)
+            except Exception:  # noqa: BLE001 -- a render failure mustn't sink the feed
+                _log.exception("Rank-change card render failed for %r", entry["user_display_name"])
+                continue
+            await self._post(
+                settings["channel_id"], file=discord.File(io.BytesIO(png), filename="rankup.png")
+            )
 
     async def _message_for(
         self,

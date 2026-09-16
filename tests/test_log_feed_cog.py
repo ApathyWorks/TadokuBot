@@ -16,6 +16,7 @@ import cogs.leaderboard as leaderboard  # noqa: F401 -- patched indirectly via t
 import cogs.log_feed as log_feed
 import lib.config_store as config_store
 import lib.profile_card as profile_card
+import lib.rank_card as rank_card
 import lib.tadoku_client as tadoku_client
 from tests.conftest import make_interaction
 
@@ -44,6 +45,8 @@ def patched(monkeypatch):
     # Stub the (Pillow) image renderer so poll tests don't render real PNGs; the
     # renderer itself is covered in test_profile_card.py.
     monkeypatch.setattr(profile_card, "render_card", AsyncMock(return_value=b"PNGDATA"))
+    # Same for the rank-change card; poll tests assert on the card model passed in.
+    monkeypatch.setattr(rank_card, "render", AsyncMock(return_value=b"RANKPNG"))
 
 
 def _log(created_at, name="ruby", score=10, deleted=False, activity="Reading",
@@ -889,3 +892,95 @@ def test_log_group_gates_at_runtime_not_via_default_permissions():
     assert log_feed.LogFeed.log_group.default_permissions is None
     for cmd in (log_feed.LogFeed.log_on, log_feed.LogFeed.log_off, log_feed.LogFeed.log_status):
         assert len(cmd.checks) == 1
+
+
+# ---------------------------------------------------------------------------
+# rank-change callouts (_rank_callouts + the poll integration)
+# ---------------------------------------------------------------------------
+
+def _lb(*rows):
+    """Leaderboard entries from ``(rank, user_id, name)`` triples."""
+    return [{"rank": r, "user_id": uid, "user_display_name": name, "score": 100 - r, "is_tie": False}
+            for r, uid, name in rows]
+
+
+def test_rank_callouts_single_pass_names_the_rival():
+    entries = _lb((1, "a", "anja"), (2, "b", "ruby"), (3, "c", "ryun"))
+    old = {"a": 1, "b": 3, "c": 2}  # ruby 3->2, swapping past ryun
+    out = log_feed._rank_callouts(entries, old, {"b"}, 20)
+    assert [(e["user_display_name"], e["rank"], e["description"]) for e in out] == [
+        ("ruby", 2, "Passed ryun"),
+    ]
+
+
+def test_rank_callouts_multi_pass_counts_the_others():
+    entries = _lb((1, "a", "anja"), (2, "b", "ruby"), (3, "c", "ryun"))
+    old = {"a": 1, "b": 4, "c": 2}  # ruby climbed 4->2
+    out = log_feed._rank_callouts(entries, old, {"b"}, 20)
+    assert out[0]["description"] == "Passed ryun and 1 other"  # passed 2; rival below is ryun
+
+
+def test_rank_callouts_break_into_the_top_slice():
+    entries = _lb((1, "a", "anja"), (2, "b", "ruby"))
+    old = {"a": 1}  # ruby wasn't in the slice before
+    assert log_feed._rank_callouts(entries, old, {"b"}, 20)[0]["description"] == "Broke into the top 20"
+
+
+def test_rank_callouts_ignore_non_loggers_and_drops():
+    entries = _lb((1, "a", "anja"), (2, "b", "ruby"))
+    old = {"a": 2, "b": 1}  # anja climbed but didn't log; ruby dropped
+    assert log_feed._rank_callouts(entries, old, {"b"}, 20) == []
+
+
+def test_rank_callouts_are_ordered_best_move_first():
+    entries = _lb((1, "a", "anja"), (2, "b", "ruby"), (3, "c", "ryun"))
+    old = {"a": 1, "b": 5, "c": 6}  # ruby and ryun both climbed and logged
+    out = log_feed._rank_callouts(entries, old, {"b", "c"}, 20)
+    assert [e["rank"] for e in out] == [2, 3]
+
+
+async def test_poll_posts_a_rank_up_card_when_a_logger_climbs():
+    channel = _channel(cid=555)
+    bot = _bot_with_channel(channel)
+    bot.get_user = lambda uid: _user_with_avatar(b"AV") if uid == 111 else None
+    config_store.set_guild_logfeed(
+        999, enabled=True, channel_id=555, last_seen=CUTOFF,
+        rank_snapshot={"contest_id": "c1", "ranks": {"uuid-ruby": 5}},  # ruby was #5
+    )
+    config_store.set_claim(999, 111, "ruby")
+    tadoku_client.list_contest_logs.side_effect = _pager({0: [
+        _log("2026-07-05T21:00:00Z", name="ruby", user_id="uuid-ruby"),
+    ]})
+    tadoku_client.get_contest_leaderboard.return_value = {"entries": _lb(
+        (1, "x", "top"), (2, "y", "anja"), (3, "uuid-ruby", "ruby"), (4, "z", "ryun"),
+    ), "total_size": 4}
+    cog = log_feed.LogFeed(bot)
+
+    await cog._poll_guild(999)
+
+    card = rank_card.render.await_args.args[0]
+    assert (card.name, card.rank) == ("ruby", 3)
+    assert card.description == "Passed ryun and 1 other"  # climbed 5 -> 3
+    assert card.avatar == b"AV"
+    # Snapshot advanced to the new positions.
+    assert config_store.get_guild_logfeed(999)["rank_snapshot"]["ranks"]["uuid-ruby"] == 3
+
+
+async def test_poll_first_baseline_seeds_snapshot_without_callouts():
+    channel = _channel(cid=555)
+    bot = _bot_with_channel(channel)
+    config_store.set_guild_logfeed(999, enabled=True, channel_id=555, last_seen=CUTOFF)  # no snapshot
+    tadoku_client.list_contest_logs.side_effect = _pager({0: [
+        _log("2026-07-05T21:00:00Z", name="ruby", user_id="uuid-ruby"),
+    ]})
+    tadoku_client.get_contest_leaderboard.return_value = {"entries": _lb(
+        (1, "uuid-ruby", "ruby"), (2, "y", "anja"),
+    ), "total_size": 2}
+    cog = log_feed.LogFeed(bot)
+
+    await cog._poll_guild(999)
+
+    rank_card.render.assert_not_awaited()  # no baseline -> seed only
+    assert config_store.get_guild_logfeed(999)["rank_snapshot"] == {
+        "contest_id": "c1", "ranks": {"uuid-ruby": 1, "y": 2},
+    }

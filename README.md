@@ -91,6 +91,12 @@ installs `fonts-dejavu-core` and `fonts-noto-cjk` so both Latin and CJK render (
 the fallback). The bot needs **Embed Links** permission for the plain embed cards and **Attach
 Files** for the rendered profile-card images (in addition to View Channel / Send Messages).
 
+Right after the logs, the feed posts a **"moved up" card** whenever one of those logs pushes someone
+up the contest's **top 20** — overtaking a rival (naming who they passed) or breaking into the top 20
+from below — with their avatar and new rank. It compares the live top 20 against the previous poll's
+positions, so the first check after enabling (or after `/set_contest` changes the contest) only sets a
+baseline and posts nothing. At most a few cards fire per poll so a big reshuffle can't flood the feed.
+
 Only logs made *after* you run `/log on` are posted (no backlog dump); a per-server high-water mark
 keeps it from repeating. A burst is capped per poll with an "…and N more" note. `/log off` stops it;
 `/log status` shows the channel. Defaults to the channel you run `/log on` in, and the bot must be
