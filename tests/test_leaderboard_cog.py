@@ -1117,3 +1117,46 @@ async def test_daily_card_uses_the_guilds_configured_contest(fake_bot):
     assert contest == CONFIGURED_CONTEST
     assert tadoku_client.list_contest_logs.await_args.args[1] == "configured-id"
     assert card.footer.startswith("Configured Contest")
+
+
+async def _top_on(fake_bot, name, day, uid="u1"):
+    """Build the daily card for one day where ``name`` is the sole top logger."""
+    _serve_day(_day_log(uid, name, 30, 10, day=day))
+    _contest, card = await leaderboard_cog.build_daily_top_card(fake_bot, 999, day_start=day)
+    return card
+
+
+async def test_daily_streak_is_one_on_the_first_day(fake_bot):
+    card = await _top_on(fake_bot, "ruby", DAY)
+    assert card.streak == 1
+
+
+async def test_daily_streak_grows_on_consecutive_days_topping(fake_bot):
+    await _top_on(fake_bot, "ruby", DAY - timedelta(days=1))
+    card = await _top_on(fake_bot, "ruby", DAY)
+    assert card.streak == 2
+
+
+async def test_daily_streak_resets_after_a_missed_day(fake_bot):
+    await _top_on(fake_bot, "ruby", DAY - timedelta(days=2))  # gap: no DAY-1 record
+    card = await _top_on(fake_bot, "ruby", DAY)
+    assert card.streak == 1
+
+
+async def test_daily_streak_resets_when_a_different_person_tops(fake_bot):
+    await _top_on(fake_bot, "ruby", DAY - timedelta(days=1))
+    card = await _top_on(fake_bot, "ryun", DAY, uid="u2")
+    assert card.streak == 1
+
+
+async def test_daily_streak_is_idempotent_across_a_same_day_retry(fake_bot):
+    await _top_on(fake_bot, "ruby", DAY - timedelta(days=1))
+    first = await _top_on(fake_bot, "ruby", DAY)
+    retry = await _top_on(fake_bot, "ruby", DAY)  # same day again (a retry)
+    assert first.streak == 2 and retry.streak == 2
+
+
+async def test_daily_streak_matches_names_case_insensitively(fake_bot):
+    await _top_on(fake_bot, "Ruby ", DAY - timedelta(days=1))  # trailing space + case
+    card = await _top_on(fake_bot, "ruby", DAY)
+    assert card.streak == 2

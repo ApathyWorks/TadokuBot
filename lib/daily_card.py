@@ -48,6 +48,8 @@ class DailyTopCard:
     ``avatar`` is the top logger's Discord avatar bytes, or ``None`` for a
     placeholder disc. ``date_label`` names the day covered (e.g. "Sunday,
     September 13, 2026"); ``footer`` carries the contest name and logger count.
+    ``streak`` is how many days in a row this person has topped the day -- shown
+    beside the score only when it's more than 1.
     """
     name: str
     score: float
@@ -55,6 +57,7 @@ class DailyTopCard:
     date_label: str
     footer: str
     avatar: Optional[bytes] = None
+    streak: int = 1
 
 
 def _points(value: float) -> str:
@@ -90,6 +93,8 @@ def _render(card: DailyTopCard) -> bytes:
     name_font = _font(36 * S, bold=True)
     score_font = _font(46 * S, bold=True)
     score_label_font = _font(22 * S)
+    streak_label_font = _font(16 * S, bold=True)
+    streak_value_font = _font(38 * S, bold=True)
     section_font = _font(15 * S, bold=True)
     title_font = _font(22 * S)
     title_points_font = _font(22 * S, bold=True)
@@ -135,6 +140,20 @@ def _render(card: DailyTopCard) -> bytes:
 
     text_x = (content_x + HERO_AVATAR_D + HERO_GAP) * S
     text_max = right * S - text_x
+
+    # Streak, filling the empty top-right of the hero: a "STREAK" label over the
+    # day count, right-aligned. Only for a run longer than a single day.
+    if card.streak > 1:
+        streak_value = f"{card.streak} days"
+        label_w = draw.textlength("STREAK", font=streak_label_font)
+        value_w = draw.textlength(streak_value, font=streak_value_font)
+        draw.text((right * S, (hero_mid - 8) * S), "STREAK",
+                  font=streak_label_font, fill=INK_SOFT, anchor="rs")
+        draw.text((right * S, (hero_mid + 50) * S), streak_value,
+                  font=streak_value_font, fill=GOLD, anchor="rs")
+        # Keep the name clear of the streak column.
+        text_max -= round(max(label_w, value_w)) + 28 * S
+
     draw.text((text_x, (hero_mid - 8) * S), _truncate(draw, _oneline(card.name), name_font, text_max),
               font=name_font, fill=INK, anchor="ls")
     score_text = _points(card.score)

@@ -518,6 +518,8 @@ async def build_daily_top_card(
         return contest, None
     top = ranked[0]
 
+    streak = _daily_streak(guild_id, top["name"], day_start)
+
     titles = sorted(top["titles"].values(), key=lambda row: (-row[1], row[0].casefold()))
     hero = {"name": top["name"]}
     await _attach_avatars(bot, guild_id, [hero])
@@ -530,8 +532,33 @@ async def build_daily_top_card(
         date_label=f"{day_start:%A}, {day_start:%B} {day_start.day}, {day_start.year}",
         footer=f"{contest['title']} · {loggers} {'person' if loggers == 1 else 'people'} logged",
         avatar=hero.get("avatar"),
+        streak=streak,
     )
     return contest, card
+
+
+def _daily_streak(guild_id: Optional[int], name: str, day_start: datetime) -> int:
+    """Consecutive days ``name`` has been ``guild_id``'s top logger, incl. today.
+
+    Reads the previous day's record and extends the streak when the same person
+    topped the day before ``day_start``; a gap or a new person resets it to 1.
+    Re-running for the same day (a retry) keeps the count rather than double-
+    incrementing. Records the result so tomorrow can build on it. Returns 1 (and
+    stores nothing) for a ``None`` guild, which has no persistent settings.
+    """
+    day = [day_start.year, day_start.month, day_start.day]
+    if not guild_id:
+        return 1
+    prev = config_store.get_daily_top(guild_id)
+    streak = 1
+    if prev and _normalize_name(prev["name"]) == _normalize_name(name):
+        yesterday = day_start - timedelta(days=1)
+        if prev["date"] == day:
+            streak = prev["streak"]  # already counted today (a retry)
+        elif prev["date"] == [yesterday.year, yesterday.month, yesterday.day]:
+            streak = prev["streak"] + 1
+    config_store.set_daily_top(guild_id, name, streak, day)
+    return streak
 
 
 class Leaderboard(commands.Cog):

@@ -51,7 +51,7 @@ channel you run `/alerts on` in):
 
 | Alert | When | Content |
 | --- | --- | --- |
-| Daily | End of each day (**00:00**) | A **top logger** spotlight for the day that just ended: their Discord avatar, name, points earned that day, and every title they logged with its points — plus a call for everyone else to pick up the slack. |
+| Daily | End of each day (**00:00**) | A **top logger** spotlight for the day that just ended: their Discord avatar, name, points earned that day, every title they logged with its points, and — once they've topped two or more days running — a **streak** count of their consecutive days on top. |
 | Weekly | Start of each week (**Monday 00:00**) | The rolling last-7-days ranking (same as `/weeklyleaderboard`). |
 | Monthly | The **1st, 00:00** | The just-ended month's ranking (same as `/monthlyleaderboard` for that month). |
 | Year-end | **Jan 1, 00:00** | The contest's final cumulative standings (same as `/leaderboard`), topped with a **top-3 podium congratulation**. |

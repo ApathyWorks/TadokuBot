@@ -93,3 +93,15 @@ def test_renders_cjk_long_titles_and_a_real_avatar_without_error():
 def test_unreadable_avatar_bytes_fall_back_to_the_placeholder():
     w, _ = _dims(_card(avatar=b"not an image"))
     assert w == round(leaderboard_card.WIDTH * leaderboard_card.ZOOM)
+
+
+def test_renders_a_multi_day_streak_without_error():
+    # The streak sits in the hero's right; a long name still renders (it's trimmed
+    # to leave the streak room).
+    w, h = _dims(_card(streak=12, name="a very long display name " * 4))
+    assert w == round(leaderboard_card.WIDTH * leaderboard_card.ZOOM) and h > 0
+
+
+def test_streak_of_one_renders_like_no_streak():
+    # A one-day "streak" is hidden, so the card is identical to the default.
+    assert daily_card._render(_card(streak=1)) == daily_card._render(_card())

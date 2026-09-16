@@ -234,6 +234,31 @@ def test_set_alert_rejects_unknown_field():
 
 
 # ---------------------------------------------------------------------------
+# Daily top logger / streak
+# ---------------------------------------------------------------------------
+
+def test_daily_top_is_none_when_unset():
+    assert config_store.get_daily_top(1) is None
+
+
+def test_set_and_get_daily_top_round_trip():
+    config_store.set_daily_top(1, "ruby", 3, [2026, 9, 13])
+    assert config_store.get_daily_top(1) == {"name": "ruby", "streak": 3, "date": [2026, 9, 13]}
+
+
+def test_set_daily_top_preserves_other_sections():
+    config_store.set_guild_contest(1, "c1", "Contest")
+    config_store.set_daily_top(1, "ruby", 1, [2026, 9, 13])
+    assert config_store.get_guild_contest(1)["contest_id"] == "c1"
+    assert config_store.get_daily_top(1)["name"] == "ruby"
+
+
+def test_daily_top_is_per_guild():
+    config_store.set_daily_top(1, "ruby", 2, [2026, 9, 13])
+    assert config_store.get_daily_top(2) is None
+
+
+# ---------------------------------------------------------------------------
 # Log feed
 # ---------------------------------------------------------------------------
 

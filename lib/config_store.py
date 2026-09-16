@@ -120,6 +120,34 @@ def set_guild_shame(guild_id: int, enabled: bool) -> None:
     _write(data)
 
 
+def get_daily_top(guild_id: int) -> dict | None:
+    """Return the last-recorded daily top logger for ``guild_id``, or ``None``.
+
+    The dict has ``name`` (the tadoku display name), ``streak`` (how many days in
+    a row they were the top logger, up to and including ``date``), and ``date``
+    (the day they last topped, as ``[year, month, day]``). Used by the daily card
+    to show a multi-day streak. ``None`` means no daily card has been built yet.
+    """
+    entry = _read().get(str(guild_id))
+    if not entry:
+        return None
+    return entry.get("daily_top")
+
+
+def set_daily_top(guild_id: int, name: str, streak: int, date: list[int]) -> None:
+    """Record ``guild_id``'s daily top logger and their current streak.
+
+    Stored alongside the guild's other settings (contest pin, shame toggle,
+    alerts), so it never clears them. ``date`` is ``[year, month, day]`` for the
+    day just recapped, letting the next day tell whether the streak continues.
+    """
+    data = _read()
+    entry = data.get(str(guild_id), {})
+    entry["daily_top"] = {"name": name, "streak": streak, "date": date}
+    data[str(guild_id)] = entry
+    _write(data)
+
+
 # The automatic alerts, each configured independently per guild. All of them share
 # one on/off switch and channel via ``/alerts``, but keep their own ``last_period``
 # marker so they fire on their own boundaries (midnight / Monday / the 1st / Jan 1).
