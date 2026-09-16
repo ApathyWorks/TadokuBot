@@ -266,15 +266,45 @@ async def test_vn_tag_never_falls_back_to_steam():
     assert len(session.calls) == 1
 
 
-async def test_mal_anime_requires_client_id(monkeypatch):
-    session = _FakeSession([])  # no key -> must not call out
+async def test_anime_anilist_hit_uses_anime_type_and_skips_mal():
+    # ``anime`` tries AniList first (keyless); a hit means MyAnimeList is never touched.
+    session = _FakeSession([
+        _FakeResponse(json_data={"data": {"Media": {
+            "coverImage": {"large": "https://al/l.jpg", "extraLarge": "https://al/xl.jpg"}}}}),
+        _FakeResponse(body=b"ANIMECOVER"),
+    ])
+    out = await poster_client.fetch_poster(session, ["anime"], "葬送のフリーレン 第1話")
+    assert out == b"ANIMECOVER"
+    method, url, kwargs = session.calls[0]
+    assert method == "POST" and url == "https://graphql.anilist.co"
+    assert "type: ANIME" in kwargs["json"]["query"]
+    assert kwargs["json"]["variables"]["search"] == "葬送のフリーレン"  # cleaned of "第1話"
+    assert session.calls[1][1] == "https://al/xl.jpg"  # download; no MAL call
+
+
+async def test_manga_anilist_hit_uses_manga_type():
+    session = _FakeSession([
+        _FakeResponse(json_data={"data": {"Media": {"coverImage": {"large": "https://al/l.jpg"}}}}),
+        _FakeResponse(body=b"MANGACOVER"),
+    ])
+    out = await poster_client.fetch_poster(session, ["comic", "manga"], "呪術廻戦 Vol. 1")
+    assert out == b"MANGACOVER"
+    query = session.calls[0][2]["json"]["query"]
+    assert "type: MANGA" in query and "format: NOVEL" not in query
+
+
+async def test_anime_falls_back_to_mal_which_needs_a_client_id(monkeypatch):
+    # AniList is keyless so it's always tried; MyAnimeList is skipped without a key.
+    session = _FakeSession([_FakeResponse(json_data={"data": {"Media": None}})])  # AniList miss
     assert await poster_client.fetch_poster(session, ["anime"], "Frieren") is None
-    assert session.calls == []
+    assert len(session.calls) == 1
+    assert session.calls[0][1] == "https://graphql.anilist.co"
 
 
-async def test_mal_manga_lookup_parses_main_picture(monkeypatch):
+async def test_manga_falls_back_to_mal_when_anilist_misses(monkeypatch):
     monkeypatch.setenv("MAL_CLIENT_ID", "test-client-id")
     session = _FakeSession([
+        _FakeResponse(json_data={"data": {"Media": None}}),  # AniList miss
         _FakeResponse(json_data={"data": [
             {"node": {"main_picture": {"medium": "https://m/med.jpg", "large": "https://m/lrg.jpg"}}}
         ]}),
@@ -282,7 +312,9 @@ async def test_mal_manga_lookup_parses_main_picture(monkeypatch):
     ])
     out = await poster_client.fetch_poster(session, ["comic", "manga"], "呪術廻戦 Vol. 1")
     assert out == b"COVER"
-    method, url, kwargs = session.calls[0]
+    # AniList tried first, then MyAnimeList.
+    assert session.calls[0][1] == "https://graphql.anilist.co"
+    method, url, kwargs = session.calls[1]
     assert method == "GET" and url.endswith("/v2/manga")
     assert kwargs["headers"]["X-MAL-CLIENT-ID"] == "test-client-id"
     assert kwargs["params"]["q"] == "呪術廻戦"  # cleaned of "Vol. 1"
@@ -291,12 +323,13 @@ async def test_mal_manga_lookup_parses_main_picture(monkeypatch):
 async def test_mal_prefers_large_but_falls_back_to_medium(monkeypatch):
     monkeypatch.setenv("MAL_CLIENT_ID", "cid")
     session = _FakeSession([
+        _FakeResponse(json_data={"data": {"Media": None}}),  # AniList miss -> fall back to MAL
         _FakeResponse(json_data={"data": [{"node": {"main_picture": {"medium": "https://m/med.jpg"}}}]}),
         _FakeResponse(body=b"OK"),
     ])
     assert await poster_client.fetch_poster(session, ["anime"], "X") == b"OK"
     # The download targets the medium URL (no large available).
-    assert session.calls[1][1] == "https://m/med.jpg"
+    assert session.calls[2][1] == "https://m/med.jpg"
 
 
 async def test_book_anilist_hit_parses_cover_and_downloads():

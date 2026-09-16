@@ -44,8 +44,8 @@ GENERAL_COMMANDS = [
 MEDIA_TAGS = [
     ("vn", "Visual-novel cover (VNDB)"),
     ("game", "Game cover (VNDB, then Steam)"),
-    ("anime", "Anime cover (MyAnimeList)"),
-    ("manga", "Manga cover (MyAnimeList)"),
+    ("anime", "Anime cover (AniList, then MyAnimeList)"),
+    ("manga", "Manga cover (AniList, then MyAnimeList)"),
     ("ln", "Light-novel cover (AniList, then Google Books)"),
     ("book / audiobook", "Book cover (AniList, then Google Books)"),
     ("tv / movie / show", "Live-action film or TV cover (TMDB)"),

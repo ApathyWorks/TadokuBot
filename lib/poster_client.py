@@ -8,8 +8,8 @@ This module maps a log to a poster image, by tag:
   * vn          -> VNDB (``api.vndb.org/kana``), no key needed
   * game        -> VNDB, then Steam's storefront as a fallback (both keyless);
                    Steam covers general games (Persona, Ys, …) that aren't VNs
-  * anime       -> MyAnimeList API v2 (needs ``MAL_CLIENT_ID``)
-  * manga       -> MyAnimeList API v2 (needs ``MAL_CLIENT_ID``)
+  * anime       -> AniList GraphQL (keyless), then MyAnimeList (needs ``MAL_CLIENT_ID``)
+  * manga       -> AniList GraphQL (keyless), then MyAnimeList (needs ``MAL_CLIENT_ID``)
   * ln          -> AniList GraphQL (light novels, keyless), then Google Books
   * book        -> AniList GraphQL (keyless), then Google Books (needs
                    ``GOOGLE_BOOKS_API_KEY`` for quota). AniList carries Japanese
@@ -17,7 +17,8 @@ This module maps a log to a poster image, by tag:
   * audiobook   -> same lookup as ``book`` (a book read aloud): AniList, then
                    Google Books
   * tv/movie/show (live-action) -> TMDB (needs ``TMDB_API_KEY``); anime is routed
-                   to MyAnimeList above, so only non-anime screen media lands here
+                   to AniList / MyAnimeList above, so only non-anime screen media
+                   lands here
 
 A VNDB cover that VNDB itself flags as NSFW is never posted: the lookup swaps in
 the bundled ``images/anime-disgust.png`` instead (see ``_vndb_is_nsfw``).
@@ -182,7 +183,10 @@ async def _image_url(
         # names this exact work, so we don't trade the stand-in for a Steam guess.
         return await _vndb_image_url(session, title) or await _steam_image_url(session, title)
     if category in ("anime", "manga"):
-        return await _mal_image_url(session, category, title)
+        # AniList first (keyless, strong Japanese coverage), then MyAnimeList.
+        media_type = "ANIME" if category == "anime" else "MANGA"
+        return await _anilist_image_url(session, title, media_type=media_type) \
+            or await _mal_image_url(session, category, title)
     if category == "ln":
         # Light novels: AniList's NOVEL search, then Google Books.
         return await _anilist_image_url(session, title, novel_only=True) \
@@ -345,20 +349,21 @@ async def _steam_image_url(
 
 
 async def _anilist_image_url(
-    session: aiohttp.ClientSession, title: str, *, novel_only: bool
+    session: aiohttp.ClientSession, title: str, *, media_type: str = "MANGA", novel_only: bool = False
 ) -> Optional[str]:
-    """Look up a light-novel / book cover on AniList's GraphQL API (no key needed).
+    """Look up a cover on AniList's GraphQL API (no key needed).
 
-    AniList indexes light novels under ``type: MANGA``; ``novel_only`` narrows the
-    search to ``format: NOVEL`` (the ``ln`` tag), while a plain ``book`` search
-    takes the best manga-or-novel match. Returns the largest ``coverImage`` URL, or
-    ``None`` on a miss / error (so the caller can fall back to Google Books). A
-    "not found" comes back as either a 200 with ``Media`` null or a 404 -- both
-    yield ``None`` here.
+    ``media_type`` selects the AniList type: ``"ANIME"`` (the ``anime`` tag) or
+    ``"MANGA"`` -- which also covers manga, light novels and books, since AniList
+    indexes novels under ``type: MANGA``. ``novel_only`` (MANGA only) narrows the
+    search to ``format: NOVEL`` for the ``ln`` tag. Returns the largest
+    ``coverImage`` URL, or ``None`` on a miss / error (so the caller can fall back
+    to MyAnimeList / Google Books). A "not found" comes back as either a 200 with
+    ``Media`` null or a 404 -- both yield ``None`` here.
     """
     fmt = ", format: NOVEL" if novel_only else ""
     query = (
-        f"query ($search: String) {{ Media(search: $search, type: MANGA{fmt}) "
+        f"query ($search: String) {{ Media(search: $search, type: {media_type}{fmt}) "
         f"{{ coverImage {{ extraLarge large medium }} }} }}"
     )
     body = {"query": query, "variables": {"search": title}}
