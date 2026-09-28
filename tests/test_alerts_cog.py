@@ -254,6 +254,7 @@ async def test_maybe_post_weekly_posts_when_period_advanced(patched_card):
     bkwargs = patched_card.await_args.kwargs
     assert bkwargs["until"] is None
     assert bkwargs["title_suffix"] == "last 7 days"
+    assert bkwargs["exclude_backlog"] is True
 
 
 async def test_maybe_post_skips_when_already_posted_this_period(patched_card):
@@ -296,6 +297,7 @@ async def test_maybe_post_monthly_posts_previous_month(patched_card):
     assert bkwargs["cutoff"] == datetime(2026, 6, 1, tzinfo=timezone.utc)
     assert bkwargs["until"] == datetime(2026, 7, 1, tzinfo=timezone.utc)
     assert bkwargs["title_suffix"] == "June 2026"
+    assert bkwargs["exclude_backlog"] is False
     assert config_store.get_guild_alert(999, "monthly")["last_period"] == [2026, 7]
 
 

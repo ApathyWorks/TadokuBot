@@ -523,6 +523,39 @@ def _recent_logs(*rows):
     return [_log(uid, name, score, now) for uid, name, score in rows]
 
 
+@pytest.mark.parametrize("tags", [["backlog"], ["book", " BackLog "], ["BACKLOG"]])
+async def test_weekly_command_excludes_backlog_points(fake_bot, tags):
+    logs = _recent_logs(("u1", "ruby", 1000), ("u1", "ruby", 5), ("u2", "ryun", 10))
+    logs[0]["tags"] = tags
+    tadoku_client.list_contest_logs.side_effect = _log_pager({0: logs})
+    cog = leaderboard_cog.Leaderboard(fake_bot)
+    await cog.weeklyleaderboard.callback(cog, make_interaction(guild_id=999))
+    assert [(e["name"], e["score"]) for e in _rendered_card().entries] == [
+        ("ryun", 10), ("ruby", 5),
+    ]
+
+
+async def test_weekly_command_backlog_only_is_empty(fake_bot):
+    logs = _recent_logs(("u1", "ruby", 1000))
+    logs[0]["tags"] = ["backlog"]
+    tadoku_client.list_contest_logs.side_effect = _log_pager({0: logs})
+    cog = leaderboard_cog.Leaderboard(fake_bot)
+    interaction = make_interaction(guild_id=999)
+    await cog.weeklyleaderboard.callback(cog, interaction)
+    assert "No points logged" in interaction.followup.send.await_args.args[0]
+
+
+async def test_monthly_command_keeps_backlog_points(fake_bot):
+    log = _log("u1", "ruby", 1000, "2026-07-05T12:00:00Z")
+    log["tags"] = ["backlog"]
+    tadoku_client.list_contest_logs.side_effect = _log_pager({0: [log]})
+    cog = leaderboard_cog.Leaderboard(fake_bot)
+    await cog.monthlyleaderboard.callback(
+        cog, make_interaction(guild_id=999), month=Choice(name="July", value=7), year=2026
+    )
+    assert _rendered_card().entries[0]["score"] == 1000
+
+
 async def test_weekly_command_defers(fake_bot):
     tadoku_client.list_contest_logs.side_effect = _log_pager({0: _recent_logs(("u1", "ruby", 5))})
     cog = leaderboard_cog.Leaderboard(fake_bot)
@@ -745,7 +778,7 @@ async def test_monthly_command_tallies_from_start_of_month(fake_bot, monkeypatch
     # 00:00:00 UTC and until is the 1st of next month.
     captured = {}
 
-    async def fake_tally(bot, contest_id, cutoff, until=None):
+    async def fake_tally(bot, contest_id, cutoff, until=None, *, exclude_backlog=False):
         captured["cutoff"] = cutoff
         captured["until"] = until
         return {"u1": ["ruby", 5.0]}
@@ -770,7 +803,7 @@ async def test_monthly_command_tallies_from_start_of_month(fake_bot, monkeypatch
 async def test_monthly_command_uses_explicit_month_and_year(fake_bot, monkeypatch):
     captured = {}
 
-    async def fake_tally(bot, contest_id, cutoff, until=None):
+    async def fake_tally(bot, contest_id, cutoff, until=None, *, exclude_backlog=False):
         captured["cutoff"] = cutoff
         captured["until"] = until
         return {"u1": ["ruby", 5.0]}
@@ -793,7 +826,7 @@ async def test_monthly_command_uses_explicit_month_and_year(fake_bot, monkeypatc
 async def test_monthly_command_defaults_year_to_current_when_only_month_given(fake_bot, monkeypatch):
     captured = {}
 
-    async def fake_tally(bot, contest_id, cutoff, until=None):
+    async def fake_tally(bot, contest_id, cutoff, until=None, *, exclude_backlog=False):
         captured["cutoff"] = cutoff
         return {"u1": ["ruby", 5.0]}
 
@@ -812,7 +845,7 @@ async def test_monthly_command_defaults_year_to_current_when_only_month_given(fa
 async def test_monthly_command_december_until_rolls_into_next_year(fake_bot, monkeypatch):
     captured = {}
 
-    async def fake_tally(bot, contest_id, cutoff, until=None):
+    async def fake_tally(bot, contest_id, cutoff, until=None, *, exclude_backlog=False):
         captured["until"] = until
         return {"u1": ["ruby", 5.0]}
 
@@ -928,6 +961,9 @@ async def test_yearend_card_renders_standings_with_podium_congrats(fake_bot):
     assert "ruby" in card.note_body and "ryun" in card.note_body and "anja" in card.note_body
     assert "next year" in card.note_body.lower()
     assert "3 participants" in card.footer
+    # Year-end keeps the API's cumulative points without filtering individual logs.
+    assert [entry["score"] for entry in card.entries] == [100, 90, 80]
+    tadoku_client.list_contest_logs.assert_not_awaited()
 
 
 async def test_yearend_card_none_when_no_entries(fake_bot):
@@ -1004,6 +1040,26 @@ def _serve_day(*logs):
     """Serve ``logs`` newest-first, as the API does."""
     ordered = sorted(logs, key=lambda log: log["created_at"], reverse=True)
     tadoku_client.list_contest_logs.side_effect = _log_pager({0: ordered})
+
+
+async def test_daily_card_excludes_backlog_from_winner_and_title_totals(fake_bot):
+    backlog = _day_log("u1", "ruby", 1000, 20, "Old reading")
+    backlog["tags"] = ["book", " BackLog "]
+    _serve_day(backlog, _day_log("u1", "ruby", 5, 10), _day_log("u2", "ryun", 10, 9))
+    _, card = await leaderboard_cog.build_daily_top_card(fake_bot, 999, day_start=DAY)
+    assert (card.name, card.score) == ("ryun", 10)
+    _serve_day(backlog, _day_log("u1", "ruby", 5, 10, "Fresh reading"))
+    _, card = await leaderboard_cog.build_daily_top_card(fake_bot, 999, day_start=DAY)
+    assert card.score == 5
+    assert card.titles == [("Fresh reading", 5)]
+
+
+async def test_daily_card_backlog_only_is_empty(fake_bot):
+    backlog = _day_log("u1", "ruby", 1000, 20)
+    backlog["tags"] = ["backlog"]
+    _serve_day(backlog)
+    _, card = await leaderboard_cog.build_daily_top_card(fake_bot, 999, day_start=DAY)
+    assert card is None
 
 
 async def test_daily_card_spotlights_the_top_scorer_with_their_titles(fake_bot):

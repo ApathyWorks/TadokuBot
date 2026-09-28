@@ -185,21 +185,31 @@ async def _tally_scores_since(
     contest_id: str,
     cutoff: datetime,
     until: datetime | None = None,
+    *,
+    exclude_backlog: bool = False,
 ) -> dict[str, list]:
     """Sum each participant's log scores in the window ``[cutoff, until)``.
 
     See ``_logs_in_window`` for how the window is scanned. Returns
     ``{user_id: [display_name, total_score]}``; the display name is taken from
     each user's newest log in the window (the first one counted).
+    ``exclude_backlog`` omits backlog-tagged logs for weekly leaderboards.
     """
     totals: dict[str, list] = {}
     async for log in _logs_in_window(bot, contest_id, cutoff, until):
+        if exclude_backlog and _is_backlog(log):
+            continue
         uid = log["user_id"]
         if uid not in totals:
             # First (newest) log for this user sets the display name.
             totals[uid] = [log.get("user_display_name", "Unknown"), 0.0]
         totals[uid][1] += log["score"]
     return totals
+
+
+def _is_backlog(log: dict) -> bool:
+    """Match the backlog tag regardless of capitalization or surrounding spaces."""
+    return any(str(tag).strip().casefold() == "backlog" for tag in log.get("tags") or [])
 
 
 def _log_title(log: dict) -> str:
@@ -218,9 +228,12 @@ async def _tally_day(
     (common: several sittings of one manga in a day) collapse into one line with
     their points summed. The display spellings -- of the person's name and each
     title -- come from the newest log, like ``_tally_scores_since``.
+    Backlog-tagged logs contribute neither points nor titles to the daily result.
     """
     people: dict[str, dict] = {}
     async for log in _logs_in_window(bot, contest_id, start, end):
+        if _is_backlog(log):
+            continue
         person = people.setdefault(
             log["user_id"],
             {"name": log.get("user_display_name", "Unknown"), "score": 0.0, "titles": {}},
@@ -436,6 +449,7 @@ async def build_period_leaderboard_card(
     until: datetime | None = None,
     title_suffix: str,
     window_phrase: str,
+    exclude_backlog: bool = False,
 ) -> tuple[dict, Optional[leaderboard_card.LeaderboardCard]]:
     """Resolve the guild's contest and build a period ranking card.
 
@@ -447,6 +461,7 @@ async def build_period_leaderboard_card(
     the window in the title; ``window_phrase`` is the prose form used in the footer
     and the shame heading. ``until`` bounds the top of the window (``None`` =
     open-ended up to now).
+    Weekly callers set ``exclude_backlog``; monthly callers keep all log scores.
 
     Returns ``(contest, card)``. ``card`` is ``None`` when nobody logged anything
     in the window, leaving it to the caller to show an "empty" message (the
@@ -454,7 +469,9 @@ async def build_period_leaderboard_card(
     ``tadoku.TadokuAPIError`` if resolving the contest or tallying logs fails.
     """
     contest = await _resolve_contest(bot, guild_id)
-    totals = await _tally_scores_since(bot, contest["id"], cutoff, until=until)
+    totals = await _tally_scores_since(
+        bot, contest["id"], cutoff, until=until, exclude_backlog=exclude_backlog
+    )
 
     ranked = _rank_by_score(totals)
     if not ranked:
@@ -682,6 +699,7 @@ class Leaderboard(commands.Cog):
         until: datetime | None = None,
         title_suffix: str,
         window_phrase: str,
+        exclude_backlog: bool = False,
     ) -> None:
         """Shared body for /weeklyleaderboard and /monthlyleaderboard.
 
@@ -701,6 +719,7 @@ class Leaderboard(commands.Cog):
                 until=until,
                 title_suffix=title_suffix,
                 window_phrase=window_phrase,
+                exclude_backlog=exclude_backlog,
             )
         except tadoku.TadokuAPIError:
             await interaction.followup.send(
@@ -739,6 +758,7 @@ class Leaderboard(commands.Cog):
             cutoff=cutoff,
             title_suffix=f"last {WEEKLY_WINDOW_DAYS} days",
             window_phrase=f"the last {WEEKLY_WINDOW_DAYS} days",
+            exclude_backlog=True,
         )
 
     @app_commands.command(
