@@ -91,6 +91,16 @@ installs `fonts-dejavu-core` and `fonts-noto-cjk` so both Latin and CJK render (
 the fallback). The bot needs **Embed Links** permission for the plain embed cards and **Attach
 Files** for the rendered profile-card images (in addition to View Channel / Send Messages).
 
+Add the `nsfw` tag to any log to replace its profile-card cover with
+`images/anime-disgust.png`, overriding other media tags and cached covers.
+Logs tagged both `youtube` and `nsfw` skip the video-link follow-up so Discord
+doesn't display the video's thumbnail or playable preview.
+The same replacement is automatic for VNDB-flagged covers, AniList adult titles
+(anime, manga, books/light novels), MyAnimeList `gray`/`black` NSFW ratings, and
+Google Books `MATURE` titles. This uses provider metadata, not image analysis;
+missing ratings may leave a cover unfiltered, so use the explicit tag when needed.
+If the replacement file is unavailable, the cover is omitted.
+
 Right after the logs, the feed posts a **"moved up" card** whenever one of those logs pushes someone
 up the contest's **top 20** — overtaking a rival (naming who they passed) or breaking into the top 20
 from below — with their avatar and new rank. It compares the live top 20 against the previous poll's

@@ -13,7 +13,7 @@ stats for that contest (characters, pages, listening hours — summed live from
 tadoku.app's per-user log history, restricted to the contest's date window), and
 this log. Everyone else gets the plain embed card.
 
-A ``youtube``-tagged log whose description contains URL(s) also gets them posted
+A ``youtube``-tagged log without ``nsfw`` whose description contains URL(s) also gets them posted
 as a follow-up message beneath the card, so Discord renders a playable preview
 for each.
 
@@ -289,13 +289,13 @@ _URL_RE = re.compile(r"https?://\S+")
 def _youtube_urls(log: dict) -> list[str]:
     """Every URL in a YouTube-tagged log's description (in order), or ``[]``.
 
-    Only fires when the log carries a ``youtube`` tag, so the feed can post the
+    Only fires when the log carries a ``youtube`` tag without ``nsfw``, so the feed can post the
     link(s) under the card (Discord renders a playable preview for each). Any
     trailing punctuation Discord would choke on is left as-is -- log URLs are
     pasted, not prose.
     """
-    tags = {str(t).lower() for t in (log.get("tags") or [])}
-    if "youtube" not in tags:
+    tags = {str(t).strip().casefold() for t in (log.get("tags") or [])}
+    if "youtube" not in tags or "nsfw" in tags:
         return []
     return _URL_RE.findall(log.get("description") or "")
 

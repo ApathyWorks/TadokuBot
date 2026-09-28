@@ -470,3 +470,79 @@ async def test_fetch_poster_memoises_via_cache():
     b = await poster_client.fetch_poster(session, ["game"], "Summer Pockets", cache)
     assert a == b == b"IMG"
     assert len(session.calls) == 2  # one search + one download, not four
+
+
+@pytest.mark.parametrize("tag", ["vn", "game", "anime", "manga", "book", "ln", "audiobook", "movie", "youtube", None])
+async def test_explicit_nsfw_tag_overrides_all_sources_and_cached_covers(tag):
+    session = _FakeSession([])
+    tags = [" NSFW "] + ([tag] if tag else [])
+    cache = {(poster_client._category(tags), "title"): b"ORIGINAL"}
+    before = cache.copy()
+    assert await poster_client.fetch_poster(session, tags, "Title", cache) == poster_client._nsfw_poster()
+    assert session.calls == []
+    assert cache == before
+
+
+async def test_explicit_nsfw_tag_without_title_and_missing_replacement(monkeypatch, tmp_path):
+    session = _FakeSession([])
+    assert await poster_client.fetch_poster(session, ["nsfw"], "") == poster_client._nsfw_poster()
+    monkeypatch.setattr(poster_client, "_NSFW_POSTER_PATH", str(tmp_path / "missing.png"))
+    assert await poster_client.fetch_poster(session, ["book", "nsfw"], "Title") is None
+    assert session.calls == []
+
+
+@pytest.mark.parametrize("tag", ["anime", "manga", "book", "ln", "audiobook"])
+@pytest.mark.parametrize("adult", [True, False])
+async def test_anilist_adult_rating_controls_cover(tag, adult, monkeypatch):
+    monkeypatch.setenv("MAL_CLIENT_ID", "test")
+    monkeypatch.setenv("GOOGLE_BOOKS_API_KEY", "test")
+    responses = [_FakeResponse(json_data={"data": {"Media": {
+        "isAdult": adult, "coverImage": {"large": "https://cover/image.jpg"},
+    }}})]
+    if not adult:
+        responses.append(_FakeResponse(body=b"SAFE"))
+    session = _FakeSession(responses)
+    cache = {}
+    expected = poster_client._nsfw_poster() if adult else b"SAFE"
+    assert await poster_client.fetch_poster(session, [tag], "Title", cache) == expected
+    assert await poster_client.fetch_poster(session, [tag], "Title", cache) == expected
+    assert "isAdult" in session.calls[0][2]["json"]["query"]
+    # An adult match never downloads the original or tries another provider.
+    assert len(session.calls) == (1 if adult else 2)
+
+
+@pytest.mark.parametrize("tag", ["anime", "manga"])
+@pytest.mark.parametrize("rating", ["white", "gray", "black"])
+async def test_mal_fallback_nsfw_rating_controls_cover(monkeypatch, tag, rating):
+    monkeypatch.setenv("MAL_CLIENT_ID", "test")
+    responses = [
+        _FakeResponse(json_data={"data": {"Media": None}}),
+        _FakeResponse(json_data={"data": [{"node": {
+            "nsfw": rating, "main_picture": {"large": "https://cover/image.jpg"},
+        }}]}),
+    ]
+    if rating == "white":
+        responses.append(_FakeResponse(body=b"SAFE"))
+    session = _FakeSession(responses)
+    expected = b"SAFE" if rating == "white" else poster_client._nsfw_poster()
+    assert await poster_client.fetch_poster(session, [tag], "Title") == expected
+    assert "nsfw" in session.calls[1][2]["params"]["fields"]
+    assert len(session.calls) == (3 if rating == "white" else 2)
+
+
+@pytest.mark.parametrize("tag", ["book", "ln", "audiobook"])
+@pytest.mark.parametrize("rating", ["MATURE", "NOT_MATURE"])
+async def test_google_books_fallback_maturity_controls_cover(monkeypatch, tag, rating):
+    monkeypatch.setenv("GOOGLE_BOOKS_API_KEY", "test")
+    responses = [
+        _FakeResponse(json_data={"data": {"Media": None}}),
+        _FakeResponse(json_data={"items": [{"volumeInfo": {
+            "maturityRating": rating, "imageLinks": {"thumbnail": "https://cover/image.jpg"},
+        }}]}),
+    ]
+    if rating == "NOT_MATURE":
+        responses.append(_FakeResponse(body=b"SAFE"))
+    session = _FakeSession(responses)
+    expected = b"SAFE" if rating == "NOT_MATURE" else poster_client._nsfw_poster()
+    assert await poster_client.fetch_poster(session, [tag], "Title") == expected
+    assert len(session.calls) == (3 if rating == "NOT_MATURE" else 2)

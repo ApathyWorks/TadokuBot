@@ -42,6 +42,7 @@ GENERAL_COMMANDS = [
 # Which tadoku.app tag makes each kind of material show a cover (or link) on the
 # log card. (tag label, what it produces.) One source of truth for the embed.
 MEDIA_TAGS = [
+    ("nsfw", "Replaces the cover with the bundled image and skips YouTube video previews"),
     ("vn", "Visual-novel cover (VNDB)"),
     ("game", "Game cover (VNDB, then Steam)"),
     ("anime", "Anime cover (AniList, then MyAnimeList)"),

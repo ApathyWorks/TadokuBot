@@ -20,8 +20,11 @@ This module maps a log to a poster image, by tag:
                    to AniList / MyAnimeList above, so only non-anime screen media
                    lands here
 
-A VNDB cover that VNDB itself flags as NSFW is never posted: the lookup swaps in
-the bundled ``images/anime-disgust.png`` instead (see ``_vndb_is_nsfw``).
+NSFW covers use the bundled ``images/anime-disgust.png`` instead. This includes
+VNDB image flags, AniList adult titles, MyAnimeList gray/black NSFW ratings,
+Google Books mature titles, and any log explicitly tagged ``nsfw``. These are
+provider metadata checks, not image analysis; missing ratings are not proof of
+safety. An explicit tag overrides every cover source and cached result.
 
 Every lookup is strictly best-effort: a miss, a missing API key, or any
 network/parse failure yields ``None`` so the log feed simply falls back to the
@@ -47,7 +50,7 @@ _log = logging.getLogger(__name__)
 # a nice-to-have, so we fail fast rather than hold the card.
 _TIMEOUT = aiohttp.ClientTimeout(total=8)
 
-# The stand-in poster used in place of a VNDB cover flagged NSFW. Resolved
+# The stand-in poster used in place of a cover flagged NSFW. Resolved
 # relative to this file (lib/ -> project root) so it works from any cwd.
 _NSFW_POSTER_PATH = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "images", "anime-disgust.png"
@@ -72,7 +75,7 @@ def _category(tags: Optional[list]) -> Optional[str]:
     """Map a log's tags to a poster source key, or ``None`` if none apply."""
     if not tags:
         return None
-    have = {str(t).lower() for t in tags}
+    have = {str(t).strip().casefold() for t in tags}
     # ``vn`` is VNDB-only; ``game`` tries VNDB then Steam. Check ``vn`` first so a
     # log tagged both keeps the (better) VNDB art without a needless Steam hop.
     if "vn" in have:
@@ -137,7 +140,7 @@ async def fetch_poster(
 
     Routes on the log's ``tags`` (see ``_category``), cleans ``description`` into
     a search query, looks up an image URL from the matching service, and
-    downloads it. A cover VNDB flags as NSFW is replaced by the bundled stand-in
+    downloads it. A cover its provider flags as NSFW is replaced by the bundled stand-in
     image rather than downloaded. Any failure at any step -- unknown category,
     empty title, missing key, network error, decode-less bytes -- collapses to
     ``None`` so the caller can fall back to the poster-less card.
@@ -145,6 +148,11 @@ async def fetch_poster(
     ``cache`` (if given) memoises results by (category, title) so a burst of the
     same material costs a single lookup + download.
     """
+    # Check before routing, title validation, or cache access: even a previously
+    # cached cover must not bypass an explicit NSFW tag. Do not cache this under
+    # the title, since another log of the same work may have different tags.
+    if any(str(tag).strip().casefold() == "nsfw" for tag in tags or []):
+        return _nsfw_poster()
     category = _category(tags)
     if category is None:
         return None
@@ -212,7 +220,7 @@ async def _mal_image_url(
     if not client_id:
         return None
     url = f"https://api.myanimelist.net/v2/{media}"
-    params = {"q": title, "limit": 1, "fields": "main_picture"}
+    params = {"q": title, "limit": 1, "fields": "main_picture,nsfw", "nsfw": "true"}
     headers = {"X-MAL-CLIENT-ID": client_id}
     async with session.get(url, params=params, headers=headers, timeout=_TIMEOUT) as resp:
         if resp.status != 200:
@@ -221,7 +229,10 @@ async def _mal_image_url(
     nodes = data.get("data") or []
     if not nodes:
         return None
-    picture = nodes[0].get("node", {}).get("main_picture") or {}
+    node = nodes[0].get("node") or {}
+    if node.get("nsfw") in ("gray", "black"):
+        return _NSFW
+    picture = node.get("main_picture") or {}
     return picture.get("large") or picture.get("medium")
 
 
@@ -364,7 +375,7 @@ async def _anilist_image_url(
     fmt = ", format: NOVEL" if novel_only else ""
     query = (
         f"query ($search: String) {{ Media(search: $search, type: {media_type}{fmt}) "
-        f"{{ coverImage {{ extraLarge large medium }} }} }}"
+        f"{{ isAdult coverImage {{ extraLarge large medium }} }} }}"
     )
     body = {"query": query, "variables": {"search": title}}
     async with session.post(
@@ -374,6 +385,8 @@ async def _anilist_image_url(
             return None
         data = await resp.json()
     media = (data.get("data") or {}).get("Media") or {}
+    if media.get("isAdult") is True:
+        return _NSFW
     cover = media.get("coverImage") or {}
     return cover.get("extraLarge") or cover.get("large") or cover.get("medium")
 
@@ -399,7 +412,10 @@ async def _google_books_image_url(
     items = data.get("items") or []
     if not items:
         return None
-    links = items[0].get("volumeInfo", {}).get("imageLinks") or {}
+    info = items[0].get("volumeInfo") or {}
+    if info.get("maturityRating") == "MATURE":
+        return _NSFW
+    links = info.get("imageLinks") or {}
     thumb = links.get("thumbnail") or links.get("smallThumbnail")
     # Google serves thumbnails over http; upgrade so the download isn't blocked.
     return thumb.replace("http://", "https://") if thumb else None

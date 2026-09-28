@@ -578,12 +578,13 @@ async def test_poll_posts_all_youtube_urls_in_one_follow_up():
     assert channel.send.await_args_list[1].args[0] == "https://youtu.be/one\nhttps://youtu.be/two"
 
 
-async def test_poll_no_url_message_for_non_youtube_log():
+@pytest.mark.parametrize("tags", [["video"], ["youtube", "nsfw"], [" YouTube ", " NSFW "]])
+async def test_poll_no_url_message_for_non_youtube_or_nsfw_log(tags):
     channel = _channel(cid=555)
     bot = _bot_with_channel(channel)
     config_store.set_guild_logfeed(999, enabled=True, channel_id=555, last_seen=CUTOFF)
     tadoku_client.list_contest_logs.side_effect = _pager({0: [
-        _log("2026-07-05T21:00:00Z", tags=["video"], description="title https://youtu.be/x"),
+        _log("2026-07-05T21:00:00Z", tags=tags, description="title https://youtu.be/x"),
     ]})
     cog = log_feed.LogFeed(bot)
 
