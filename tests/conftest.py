@@ -37,7 +37,7 @@ def reset_tadoku_auth(monkeypatch):
 @pytest.fixture
 def fake_bot():
     """A stand-in for TadokuBot with just the attributes cogs actually use."""
-    return SimpleNamespace(session=AsyncMock())
+    return SimpleNamespace(session=AsyncMock(), get_guild=lambda guild_id: None)
 
 
 def make_interaction(*, guild_id=None, user_id=111):

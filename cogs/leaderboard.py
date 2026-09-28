@@ -30,6 +30,7 @@ from discord.ext import commands
 import lib.config_store as config_store
 import lib.daily_card as daily_card
 import lib.leaderboard_card as leaderboard_card
+from lib.membership import departed_names
 import lib.tadoku_client as tadoku
 
 # Emoji shown for the top three ranks; every other rank gets a plain "#N".
@@ -397,6 +398,49 @@ async def _attach_avatars(bot: commands.Bot, guild_id: Optional[int], entries: l
             entry["avatar"] = await _fetch_avatar(bot, uid, cache)
 
 
+async def _guild_leaderboard(
+    bot, guild_id, contest_id, *, page=0, language_code=None, activity_id=None
+) -> dict:
+    """Filter cumulative standings before ranking, counting, and pagination.
+
+    With no confirmed departures, keep the usual single-page API lookup.
+    Otherwise scan the standings so removals do not leave gaps or short pages.
+    Scores and IDs are preserved, including tied scores and backlog points.
+    """
+    departed = await departed_names(bot, guild_id)
+    filters = {}
+    if language_code is not None:
+        filters["language_code"] = language_code
+    if activity_id is not None:
+        filters["activity_id"] = activity_id
+    if not departed:
+        return await tadoku.get_contest_leaderboard(
+            bot.session, contest_id, page=page, page_size=PAGE_SIZE, **filters
+        )
+
+    entries = []
+    for api_page in range(MAX_LOOKUP_PAGES):
+        data = await tadoku.get_contest_leaderboard(
+            bot.session, contest_id, page=api_page, page_size=LOOKUP_PAGE_SIZE, **filters
+        )
+        batch = data.get("entries", [])
+        entries.extend(e for e in batch if _normalize_name(e["user_display_name"]) not in departed)
+        if len(batch) < LOOKUP_PAGE_SIZE or (api_page + 1) * LOOKUP_PAGE_SIZE >= data.get("total_size", float("inf")):
+            break
+    else:
+        raise tadoku.TadokuAPIError("Leaderboard exceeds membership-filter scan limit")
+
+    entries.sort(key=lambda entry: entry["score"], reverse=True)
+    scores = [entry["score"] for entry in entries]
+    ranked = [
+        {**entry, "rank": 1 + sum(score > entry["score"] for score in scores),
+         "is_tie": scores.count(entry["score"]) > 1}
+        for entry in entries
+    ]
+    start = page * PAGE_SIZE
+    return {"entries": ranked[start:start + PAGE_SIZE], "total_size": len(ranked)}
+
+
 async def build_yearend_card(
     bot: commands.Bot, guild_id: Optional[int]
 ) -> tuple[dict, Optional[leaderboard_card.LeaderboardCard]]:
@@ -412,8 +456,8 @@ async def build_yearend_card(
     ``tadoku.TadokuAPIError`` if the lookup fails.
     """
     contest = await _resolve_contest(bot, guild_id)
-    data = await tadoku.get_contest_leaderboard(
-        bot.session, contest["id"], page=0, page_size=PAGE_SIZE
+    data = await _guild_leaderboard(
+        bot, guild_id, contest["id"], page=0
     )
     entries = data.get("entries", [])
     if not entries:
@@ -472,6 +516,8 @@ async def build_period_leaderboard_card(
     totals = await _tally_scores_since(
         bot, contest["id"], cutoff, until=until, exclude_backlog=exclude_backlog
     )
+    departed = await departed_names(bot, guild_id)
+    totals = {uid: row for uid, row in totals.items() if _normalize_name(row[0]) not in departed}
 
     ranked = _rank_by_score(totals)
     if not ranked:
@@ -487,6 +533,7 @@ async def build_period_leaderboard_card(
             # The ranking above already succeeded; a failed shame lookup
             # shouldn't sink the whole card, so just skip the section.
             participants = []
+        participants = [p for p in participants if _normalize_name(p["user_display_name"]) not in departed]
         slackers = _shame_slackers(participants, totals)
         if slackers:
             note_title = f"Shame — logged nothing in {window_phrase}"
@@ -527,6 +574,8 @@ async def build_daily_top_card(
     contest = await _resolve_contest(bot, guild_id)
     day_end = day_start + timedelta(days=1)
     people = await _tally_day(bot, contest["id"], day_start, day_end)
+    departed = await departed_names(bot, guild_id)
+    people = {uid: person for uid, person in people.items() if _normalize_name(person["name"]) not in departed}
 
     ranked = sorted(
         people.values(), key=lambda person: (-person["score"], _normalize_name(person["name"]))
@@ -640,12 +689,12 @@ class Leaderboard(commands.Cog):
 
         try:
             contest = await _resolve_contest(self.bot, interaction.guild_id)
-            data = await tadoku.get_contest_leaderboard(
-                self.bot.session,
+            data = await _guild_leaderboard(
+                self.bot,
+                interaction.guild_id,
                 contest["id"],
                 # Users pass 1-based pages; the API is 0-based.
                 page=page - 1,
-                page_size=PAGE_SIZE,
                 language_code=language,
                 # ``activity`` is a Choice; unwrap to its id, or None if unset.
                 activity_id=activity.value if activity else None,

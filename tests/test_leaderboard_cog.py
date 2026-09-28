@@ -9,6 +9,7 @@ by calling their ``.callback(...)`` directly with a fake interaction.
 """
 
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import discord
@@ -92,6 +93,100 @@ async def test_resolve_contest_uses_configured_contest(fake_bot):
 
 def _entry(rank, name, score, is_tie=False):
     return {"rank": rank, "user_id": f"u{rank}", "user_display_name": name, "score": score, "is_tie": is_tie}
+
+
+def _departed_member(bot, name="ruby"):
+    config_store.set_claim(999, 111, name)
+    missing = discord.NotFound(SimpleNamespace(status=404, reason="Not Found"),
+                               {"code": 10007, "message": "Unknown Member"})
+    guild = SimpleNamespace(fetch_member=AsyncMock(side_effect=missing))
+    bot.get_guild = lambda gid: guild
+    return guild
+
+
+async def test_cumulative_membership_filter_repages_reranks_and_rejoins(fake_bot, monkeypatch):
+    guild = _departed_member(fake_bot)
+    monkeypatch.setattr(leaderboard_cog, "LOOKUP_PAGE_SIZE", 2)
+    monkeypatch.setattr(leaderboard_cog, "PAGE_SIZE", 2)
+    rows = [_entry(1, "ruby", 100), _entry(2, "ryun", 50),
+            _entry(2, "anja", 50), _entry(4, "unlinked", 10)]
+
+    async def fetch(session, contest_id, *, page, page_size, **filters):
+        assert filters == {"language_code": "jpn", "activity_id": 1}
+        return {"entries": rows[page * page_size:(page + 1) * page_size], "total_size": 4}
+
+    tadoku_client.get_contest_leaderboard.side_effect = fetch
+    first = await leaderboard_cog._guild_leaderboard(
+        fake_bot, 999, "c1", language_code="jpn", activity_id=1
+    )
+    assert first["total_size"] == 3
+    assert [(e["user_display_name"], e["rank"], e["is_tie"]) for e in first["entries"]] == [
+        ("ryun", 1, True), ("anja", 1, True),
+    ]
+    second = await leaderboard_cog._guild_leaderboard(
+        fake_bot, 999, "c1", page=1, language_code="jpn", activity_id=1
+    )
+    assert [(e["user_display_name"], e["rank"]) for e in second["entries"]] == [("unlinked", 3)]
+    guild.fetch_member.side_effect = None
+    guild.fetch_member.return_value = object()
+    rejoined = await leaderboard_cog._guild_leaderboard(
+        fake_bot, 999, "c1", language_code="jpn", activity_id=1
+    )
+    assert rejoined["total_size"] == 4
+    assert rejoined["entries"][0]["user_display_name"] == "ruby"
+
+
+async def test_leaderboard_command_filters_departed_members(fake_bot):
+    _departed_member(fake_bot)
+    tadoku_client.get_contest_leaderboard.return_value = {
+        "entries": [_entry(1, "ruby", 100), _entry(2, "ryun", 10)], "total_size": 2,
+    }
+    cog = leaderboard_cog.Leaderboard(fake_bot)
+    interaction = make_interaction(guild_id=999)
+    await cog.leaderboard.callback(cog, interaction)
+    embed = interaction.followup.send.await_args.kwargs["embed"]
+    assert "ruby" not in embed.description
+    assert "🥇 ryun" in embed.description
+    assert "1 participants" in embed.footer.text
+
+
+@pytest.mark.parametrize("weekly", [True, False])
+async def test_period_rankings_and_shame_exclude_departed_members(fake_bot, weekly):
+    _departed_member(fake_bot)
+    logs = _recent_logs(("u1", "ruby", 100), ("u2", "ryun", 10))
+    tadoku_client.list_contest_logs.side_effect = _log_pager({0: logs})
+    tadoku_client.get_contest_leaderboard.return_value = {
+        "entries": [_entry(1, "ruby", 100), _entry(2, "ryun", 10)], "total_size": 2,
+    }
+    _, card = await leaderboard_cog.build_period_leaderboard_card(
+        fake_bot, 999, cutoff=CUTOFF, title_suffix="period", window_phrase="period",
+        exclude_backlog=weekly,
+    )
+    assert [(e["name"], e["rank"]) for e in card.entries] == [("ryun", 1)]
+    assert not card.note_body
+    assert "1 of 1" in card.footer
+
+
+async def test_yearend_excludes_departed_members_before_podium(fake_bot):
+    _departed_member(fake_bot)
+    tadoku_client.get_contest_leaderboard.return_value = {
+        "entries": [_entry(1, "ruby", 100), _entry(2, "ryun", 10)], "total_size": 2,
+    }
+    _, card = await leaderboard_cog.build_yearend_card(fake_bot, 999)
+    assert [(e["name"], e["rank"], e["score"]) for e in card.entries] == [("ryun", 1, 10)]
+    assert "ruby" not in card.note_body
+    assert "1 participants" in card.footer
+
+
+async def test_daily_winner_excludes_departed_members(fake_bot):
+    _departed_member(fake_bot)
+    _serve_day(_day_log("u1", "ruby", 100, 12), _day_log("u2", "ryun", 10, 10))
+    _, card = await leaderboard_cog.build_daily_top_card(fake_bot, 999, day_start=DAY)
+    assert (card.name, card.score) == ("ryun", 10)
+    assert "1 person logged" in card.footer
+    _serve_day(_day_log("u1", "ruby", 100, 12))
+    _, card = await leaderboard_cog.build_daily_top_card(fake_bot, 999, day_start=DAY)
+    assert card is None
 
 
 async def test_leaderboard_defers_before_calling_the_api(fake_bot):
@@ -183,7 +278,6 @@ async def test_leaderboard_page_is_zero_indexed_for_the_api_call(fake_bot):
 
     tadoku_client.get_contest_leaderboard.assert_awaited_once_with(
         fake_bot.session, LATEST_OFFICIAL["id"], page=2, page_size=leaderboard_cog.PAGE_SIZE,
-        language_code=None, activity_id=None,
     )
 
 

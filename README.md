@@ -120,6 +120,15 @@ able to post there.
 
 ## Discord ↔ Tadoku matching
 
+Leaderboards automatically omit linked participants who have left this Discord
+server. This applies to `/leaderboard`, weekly/monthly rankings, daily spotlights,
+year-end standings, and inactivity callouts. Membership is checked live when a
+new leaderboard is generated; rejoining restores the participant on the next
+post without reclaiming their name. Existing messages are not edited.
+Their claim and Tadoku scores are preserved. Unlinked participants stay visible,
+and temporary Discord lookup failures do not count as departures. No additional
+privileged Discord intent is required.
+
 The bot can remember which Discord member is which tadoku.app participant, per server. The mapping
 is two-way unique: **each member claims at most one username, and each username is claimed by at most
 one member** (matching is case- and whitespace-insensitive, like the leaderboard).
