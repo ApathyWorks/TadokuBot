@@ -42,7 +42,7 @@ GENERAL_COMMANDS = [
 # Which tadoku.app tag makes each kind of material show a cover (or link) on the
 # log card. (tag label, what it produces.) One source of truth for the embed.
 MEDIA_TAGS = [
-    ("nsfw", "Replaces the cover with the bundled image and skips YouTube video previews"),
+    ("nsfw", "Replaces the cover with the bundled image and disables link previews"),
     ("vn", "Visual-novel cover (VNDB)"),
     ("game", "Game cover (VNDB, then Steam)"),
     ("anime", "Anime cover (AniList, then MyAnimeList)"),
@@ -50,7 +50,7 @@ MEDIA_TAGS = [
     ("ln", "Light-novel cover (AniList, then Google Books)"),
     ("book / audiobook", "Book cover (AniList, then Google Books)"),
     ("tv / movie / show", "Live-action film or TV cover (TMDB)"),
-    ("youtube", "Posts the video link from the log's description under the card"),
+    ("youtube", "Optional: description links are posted under the card with any tags"),
 ]
 
 ADMIN_COMMANDS = [
@@ -104,7 +104,7 @@ def build_tag_embed() -> discord.Embed:
         name="Notes",
         value=(
             "• Covers appear on the **profile card** — link your account first with `/claim`.\n"
-            "• For a **youtube** log, paste the video URL into the log's description.\n"
+            "• Any HTTP(S) link in the description is posted beneath the card; no tag needed.\n"
             "• No matching tag just means a plain card (no cover)."
         ),
         inline=False,

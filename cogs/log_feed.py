@@ -13,9 +13,8 @@ stats for that contest (characters, pages, listening hours — summed live from
 tadoku.app's per-user log history, restricted to the contest's date window), and
 this log. Everyone else gets the plain embed card.
 
-A ``youtube``-tagged log without ``nsfw`` whose description contains URL(s) also gets them posted
-as a follow-up message beneath the card, so Discord renders a playable preview
-for each.
+Any log whose description contains HTTP(S) URLs gets them posted beneath the
+card as clickable links. NSFW-tagged logs suppress previews on that follow-up.
 
 After the logs, the poller posts a **"moved up" card** (see ``lib.rank_card``) for
 anyone those logs pushed up the contest's top ``RANK_CALLOUT_DEPTH`` — overtaking
@@ -282,22 +281,25 @@ def _rank_callouts(entries: list[dict], old_ranks: dict, logger_ids: set, depth:
     return movers
 
 
-# First http(s) URL in a string (stops at whitespace).
-_URL_RE = re.compile(r"https?://\S+")
+# HTTP(S) URLs, excluding whitespace and common markup delimiters.
+_URL_RE = re.compile(r'''https?://[^\s<>"']+''', re.IGNORECASE)
 
 
-def _youtube_urls(log: dict) -> list[str]:
-    """Every URL in a YouTube-tagged log's description (in order), or ``[]``.
-
-    Only fires when the log carries a ``youtube`` tag without ``nsfw``, so the feed can post the
-    link(s) under the card (Discord renders a playable preview for each). Any
-    trailing punctuation Discord would choke on is left as-is -- log URLs are
-    pasted, not prose.
-    """
-    tags = {str(t).strip().casefold() for t in (log.get("tags") or [])}
-    if "youtube" not in tags or "nsfw" in tags:
-        return []
-    return _URL_RE.findall(log.get("description") or "")
+def _description_urls(log: dict) -> list[str]:
+    """Extract clickable HTTP(S) URLs in order, regardless of media tags."""
+    urls = []
+    for url in _URL_RE.findall(log.get("description") or ""):
+        url = url.rstrip(".,;:!?。 、")
+        # Remove prose/Markdown closing brackets, preserving balanced URL parts
+        # such as Wikipedia's /Title_(novel).
+        while url and url[-1] in ")]}":
+            closing = url[-1]
+            opening = {")": "(", "]": "[", "}": "{"}[closing]
+            if url.count(closing) <= url.count(opening):
+                break
+            url = url[:-1]
+        urls.append(url)
+    return urls
 
 
 def _format_tags(log: dict) -> str:
@@ -445,11 +447,13 @@ class LogFeed(commands.Cog):
                 poster_cache, standing_cache,
             )
             await self._post(settings["channel_id"], **message)
-            # For a YouTube log, drop the video link(s) under the card in one
-            # follow-up message so Discord renders a playable preview for each.
-            urls = _youtube_urls(log)
+            # Make links clickable even when the description is drawn in an image.
+            urls = _description_urls(log)
             if urls:
-                await self._post(settings["channel_id"], content="\n".join(urls))
+                nsfw = any(str(tag).strip().casefold() == "nsfw" for tag in log.get("tags") or [])
+                await self._post(
+                    settings["channel_id"], content="\n".join(urls), suppress_embeds=nsfw
+                )
         if overflow > 0:
             await self._post(
                 settings["channel_id"],
@@ -687,6 +691,7 @@ class LogFeed(commands.Cog):
         content: Optional[str] = None,
         embed: Optional[discord.Embed] = None,
         file: Optional[discord.File] = None,
+        suppress_embeds: bool = False,
     ) -> None:
         """Send a message (text, embed and/or file) to the channel, tolerating a
         missing/forbidden one."""
@@ -698,7 +703,7 @@ class LogFeed(commands.Cog):
                 _log.warning("Log feed: channel %s not found", channel_id)
                 return
         try:
-            await channel.send(content, embed=embed, file=file)
+            await channel.send(content, embed=embed, file=file, suppress_embeds=suppress_embeds)
         except discord.HTTPException:
             _log.warning("Log feed: couldn't post to channel %s", channel_id)
 

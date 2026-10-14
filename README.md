@@ -99,8 +99,10 @@ Files** for the rendered profile-card images (in addition to View Channel / Send
 
 Add the `nsfw` tag to any log to replace its profile-card cover with
 `images/anime-disgust.png`, overriding other media tags and cached covers.
-Logs tagged both `youtube` and `nsfw` skip the video-link follow-up so Discord
-doesn't display the video's thumbnail or playable preview.
+Any HTTP(S) links in a log's description are posted beneath its card as clickable
+links, regardless of tags (including logs with no tags). The `youtube` tag is no
+longer required. For `nsfw` logs, these links remain clickable but their previews
+are disabled, so Discord doesn't display thumbnails or playable previews.
 The same replacement is automatic for VNDB-flagged covers, AniList adult titles
 (anime, manga, books/light novels), MyAnimeList `gray`/`black` NSFW ratings, and
 Google Books `MATURE` titles. This uses provider metadata, not image analysis;

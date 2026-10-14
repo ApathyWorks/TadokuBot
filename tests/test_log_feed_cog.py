@@ -222,31 +222,39 @@ def test_this_log_line_displays_duration_without_empty_amount():
 
 
 # ---------------------------------------------------------------------------
-# _youtube_urls
+# _description_urls
 # ---------------------------------------------------------------------------
 
-def test_youtube_urls_extracts_single_link():
+def test_description_urls_extracts_single_link():
     log = _log(CUTOFF, tags=["youtube"], description="面白い動画 https://youtu.be/abc123")
-    assert log_feed._youtube_urls(log) == ["https://youtu.be/abc123"]
+    assert log_feed._description_urls(log) == ["https://youtu.be/abc123"]
 
 
-def test_youtube_urls_extracts_all_links_in_order():
+def test_description_urls_extracts_all_links_in_order():
     log = _log(CUTOFF, tags=["youtube"],
                description="part 1 https://youtu.be/one and https://youtu.be/two")
-    assert log_feed._youtube_urls(log) == ["https://youtu.be/one", "https://youtu.be/two"]
+    assert log_feed._description_urls(log) == ["https://youtu.be/one", "https://youtu.be/two"]
 
 
-def test_youtube_urls_empty_without_the_youtube_tag():
-    # A URL in the description but no youtube tag -> we don't post the link.
-    assert log_feed._youtube_urls(_log(CUTOFF, tags=["video"], description="https://youtu.be/x")) == []
+@pytest.mark.parametrize("tags", [None, [], ["book"], ["video"], ["nsfw"]])
+def test_description_urls_do_not_require_a_tag(tags):
+    assert log_feed._description_urls(_log(CUTOFF, tags=tags, description="https://example.com/book")) == ["https://example.com/book"]
 
 
-def test_youtube_urls_empty_when_description_has_no_url():
-    assert log_feed._youtube_urls(_log(CUTOFF, tags=["youtube"], description="just a title")) == []
+def test_description_urls_empty_when_description_has_no_url():
+    assert log_feed._description_urls(_log(CUTOFF, tags=["youtube"], description="just a title")) == []
 
 
-def test_youtube_urls_empty_without_tags():
-    assert log_feed._youtube_urls(_log(CUTOFF, description="https://youtu.be/x")) == []
+@pytest.mark.parametrize("description, expected", [
+    (None, []),
+    ("Read [this](https://example.com/book).", ["https://example.com/book"]),
+    ("<https://example.com/book>", ["https://example.com/book"]),
+    ("https://example.com/Title_(novel)", ["https://example.com/Title_(novel)"]),
+    ("See HTTPS://example.com/book?q=one&x=two#part, then http://example.com/next.",
+     ["HTTPS://example.com/book?q=one&x=two#part", "http://example.com/next"]),
+])
+def test_description_urls_handle_prose_and_markup(description, expected):
+    assert log_feed._description_urls(_log(CUTOFF, description=description)) == expected
 
 
 # ---------------------------------------------------------------------------
@@ -561,7 +569,7 @@ async def test_poll_posts_youtube_url_under_the_card():
     assert channel.send.await_args_list[1].args[0] == "https://youtu.be/xyz"  # the URL
 
 
-async def test_poll_posts_all_youtube_urls_in_one_follow_up():
+async def test_poll_posts_all_description_urls_in_one_follow_up():
     channel = _channel(cid=555)
     bot = _bot_with_channel(channel)
     config_store.set_guild_logfeed(999, enabled=True, channel_id=555, last_seen=CUTOFF)
@@ -578,19 +586,25 @@ async def test_poll_posts_all_youtube_urls_in_one_follow_up():
     assert channel.send.await_args_list[1].args[0] == "https://youtu.be/one\nhttps://youtu.be/two"
 
 
-@pytest.mark.parametrize("tags", [["video"], ["youtube", "nsfw"], [" YouTube ", " NSFW "]])
-async def test_poll_no_url_message_for_non_youtube_or_nsfw_log(tags):
+@pytest.mark.parametrize("tags, suppress", [
+    ([], False), (["book"], False), (["video"], False),
+    (["youtube", "nsfw"], True), ([" YouTube ", " NSFW "], True), (["book", "nsfw"], True),
+])
+async def test_poll_posts_description_links_and_suppresses_nsfw_previews(tags, suppress):
     channel = _channel(cid=555)
     bot = _bot_with_channel(channel)
     config_store.set_guild_logfeed(999, enabled=True, channel_id=555, last_seen=CUTOFF)
     tadoku_client.list_contest_logs.side_effect = _pager({0: [
-        _log("2026-07-05T21:00:00Z", tags=tags, description="title https://youtu.be/x"),
+        _log("2026-07-05T21:00:00Z", tags=tags, description="title https://example.com/book https://youtu.be/x"),
     ]})
     cog = log_feed.LogFeed(bot)
 
     await cog._poll_guild(999)
 
-    assert channel.send.await_count == 1  # just the card; no link follow-up
+    assert channel.send.await_count == 2
+    follow_up = channel.send.await_args_list[1]
+    assert follow_up.args[0] == "https://example.com/book\nhttps://youtu.be/x"
+    assert follow_up.kwargs["suppress_embeds"] is suppress
 
 
 async def test_poll_falls_back_to_embed_when_contest_stats_lookup_fails():
