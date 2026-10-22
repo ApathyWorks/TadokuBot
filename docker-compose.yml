@@ -6,7 +6,7 @@ services:
     # Auto-restart on crash or a dropped gateway connection.
     restart: unless-stopped
     volumes:
-      # Persist data/config.json (per-guild settings) across rebuilds.
+      # Persist server settings and the private Tadoku session across rebuilds.
       - tadoku-data:/app/data
 
 volumes:

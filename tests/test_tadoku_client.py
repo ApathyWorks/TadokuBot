@@ -165,11 +165,11 @@ async def test_list_user_logs_returns_envelope_and_sends_paging(tadoku_server):
 
 
 # ---------------------------------------------------------------------------
-# authentication (Kratos session): login-before-first-call + 401 retry
+# authentication (native session): login-before-first-call + 401 retry
 # ---------------------------------------------------------------------------
 
 def _fake_auth():
-    return SimpleNamespace(ensure_login=AsyncMock())
+    return SimpleNamespace(ensure_login=AsyncMock(return_value=(1, "TOKEN")))
 
 
 async def test_get_logs_in_before_the_first_request(monkeypatch):
@@ -192,17 +192,37 @@ async def test_get_refreshes_session_and_retries_on_401(monkeypatch):
 
     assert data == {"ok": 1}
     assert tadoku._fetch.await_count == 2
-    # Two logins: the initial ensure, then a forced refresh after the 401.
+    # Refresh identifies the rejected session generation.
     assert auth.ensure_login.await_count == 2
-    assert auth.ensure_login.await_args_list[1].kwargs.get("force") is True
+    assert auth.ensure_login.await_args_list[1].kwargs.get("rejected_generation") == 1
 
 
 async def test_get_raises_if_still_unauthorized_after_retry(monkeypatch):
     monkeypatch.setattr(tadoku, "_auth", _fake_auth())
-    monkeypatch.setattr(tadoku, "_fetch", AsyncMock(side_effect=[(403, None), (403, None)]))
+    monkeypatch.setattr(tadoku, "_fetch", AsyncMock(side_effect=[(401, None), (401, None)]))
 
     with pytest.raises(tadoku.TadokuAPIError):
         await tadoku._get(SimpleNamespace(), "/x")
+    assert tadoku._fetch.await_count == 2
+
+
+async def test_get_does_not_refresh_on_403(monkeypatch):
+    auth = _fake_auth()
+    monkeypatch.setattr(tadoku, "_auth", auth)
+    monkeypatch.setattr(tadoku, "_fetch", AsyncMock(return_value=(403, None)))
+    with pytest.raises(tadoku.TadokuAPIError):
+        await tadoku._get(SimpleNamespace(), "/x")
+    auth.ensure_login.assert_awaited_once()
+    tadoku._fetch.assert_awaited_once()
+
+
+async def test_retry_uses_the_new_session_token(monkeypatch):
+    auth = _fake_auth()
+    auth.ensure_login.side_effect = [(1, "old"), (2, "new")]
+    monkeypatch.setattr(tadoku, "_auth", auth)
+    monkeypatch.setattr(tadoku, "_fetch", AsyncMock(side_effect=[(401, None), (200, {})]))
+    await tadoku._get(SimpleNamespace(), "/x")
+    assert [call.kwargs["token"] for call in tadoku._fetch.await_args_list] == ["old", "new"]
 
 
 async def test_get_without_auth_does_not_retry_on_401(monkeypatch):

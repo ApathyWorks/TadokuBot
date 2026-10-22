@@ -27,7 +27,7 @@ RUN useradd --create-home appuser \
     && chown -R appuser /app
 USER appuser
 
-# Per-guild settings (contest pin, shame, alerts, log feed) live here.
+# Per-guild settings and the private, reusable Tadoku session live here.
 VOLUME ["/app/data"]
 
 # Slash-command-only gateway bot: nothing to EXPOSE.

@@ -57,14 +57,15 @@ class TadokuBot(commands.Bot):
         Opens the HTTP session, loads all cogs, and syncs the slash-command
         tree with Discord.
         """
-        self.session = aiohttp.ClientSession()
-        # If tadoku credentials are configured, install the Kratos login-session
+        # If tadoku credentials are configured, install the native Tadoku session
         # manager so API calls authenticate and refresh their session on expiry.
         # With no credentials this is None and the client stays anonymous.
-        auth = tadoku_auth.KratosAuth.from_env()
+        auth = tadoku_auth.TadokuAuth.from_env()
+        # Send Tadoku cookies explicitly per API request, never to poster providers.
+        self.session = aiohttp.ClientSession(cookie_jar=aiohttp.DummyCookieJar())
         tadoku_client.configure_auth(auth)
         if auth is not None:
-            _log.info("tadoku.app authentication enabled (as %s)", auth.email)
+            _log.info("tadoku.app authentication enabled")
         # Route every uncaught app-command exception through our handler below.
         self.tree.on_error = self.on_application_command_error
 

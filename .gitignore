@@ -1,5 +1,6 @@
 .env
 data/config.json
+data/tadoku-session.json*
 __pycache__/
 *.pyc
 venv/

@@ -161,15 +161,14 @@ one member** (matching is case- and whitespace-insensitive, like the leaderboard
    ```
    ADMIN_ROLES=Moderator,Officers
    ```
-   Optionally, log in to tadoku.app so API calls carry an authenticated session (needed if the
-   endpoints you use are gated/rate-limited). tadoku uses Ory Kratos, whose `ory_kratos_session`
-   cookie expires — the bot logs in with these credentials on startup and, when a request comes back
-   401/403, re-logs-in and retries automatically. Use a **dedicated bot account without 2FA** (2FA
-   blocks automated login). Leave blank to use the public endpoints anonymously (the default).
+   Optionally, log in with Tadoku's native identity API. Set both credentials below,
+   preferably for a dedicated bot account, or leave both blank for anonymous public reads.
+   The bot signs in on first use and stores its `tadoku_session` cookie privately for reuse
+   across restarts. Sessions last up to 30 days; expired sessions renew automatically.
+   An API `401` refreshes the session and retries once; `403` does not trigger a login.
    ```
    TADOKU_EMAIL=bot@example.com
    TADOKU_PASSWORD=your_password
-   # KRATOS_PUBLIC_URL defaults to https://account.tadoku.app/kratos
    ```
 4. Run it:
    ```
@@ -179,14 +178,35 @@ one member** (matching is case- and whitespace-insensitive, like the leaderboard
 Slash commands sync globally on startup — it can take a short while for Discord to propagate
 new/changed commands to clients.
 
+When upgrading from Kratos, keep the same Tadoku email/password and remove
+`KRATOS_PUBLIC_URL` (it is ignored with a warning). Existing server settings and
+claims need no migration. Old Kratos cookies cannot be reused.
+
+Rejected credentials or login configuration errors pause sign-in until you correct
+the settings and restart. Throttling pauses sign-in for at least 15 minutes, including
+across restarts; transient failures back off from 30 seconds to 15 minutes. The bot
+does not sign out on shutdown. Session persistence failures are logged, and the bot
+continues using its in-memory session.
+
+After deploying, verify a successful session lookup and an authenticated read, then
+restart and confirm the stored session is reused without another sign-in. The first
+authenticated use validates a restored session through `/api/internal/identity/session`.
+No credentials or session cookies should be copied into diagnostic output.
+
 ## Local state
 
-The only thing persisted locally is `data/config.json`, a per-server mapping of settings: which
+`data/config.json` stores a per-server mapping of settings: which
 contest `/leaderboard` should display, whether the shame call-out is on, each server's alert
 settings (enabled, target channel, and the last period posted for each of the weekly/monthly/yearly
-alerts), the log-feed settings, and the Discord-member ↔ Tadoku-username claims. Everything else
+alerts), the log-feed settings, and the Discord-member ↔ Tadoku-username claims. Contest data
 (contest details, scores, rankings) is fetched live from
 `https://tadoku.app/api/internal/immersion/`.
+
+When authentication is enabled, `data/tadoku-session.json` also stores the cookie,
+account email, expiry, and retry deadline (never the password). It is written atomically
+with owner-only permissions, excluded from Git and Docker build context, and preserved
+by the existing Docker data volume. Treat this file as a credential. Missing, invalid,
+expired, or different-account sessions are replaced on the next successful login.
 
 ## Running tests
 

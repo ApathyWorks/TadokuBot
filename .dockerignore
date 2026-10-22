@@ -7,6 +7,7 @@ __pycache__/
 .pytest_cache/
 .env
 data/config.json
+data/tadoku-session.json*
 .claude/
 tests/
 requirements-dev.txt

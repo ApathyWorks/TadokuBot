@@ -5,10 +5,10 @@ request and returns already-parsed JSON:
 
     https://tadoku.app/api/internal/immersion/
 
-Authentication is optional and handled transparently. If a ``KratosAuth`` is
+Authentication is optional and handled transparently. If a ``TadokuAuth`` is
 installed via ``configure_auth`` (the bot does this at startup when tadoku
 credentials are configured), every request carries the login session cookie and
-a 401/403 triggers a re-login + one retry -- see ``lib.tadoku_auth``. With no
+a 401 triggers a re-login + one retry -- see ``lib.tadoku_auth``. With no
 auth configured the client stays anonymous, as the public read endpoints have
 always been used.
 
@@ -22,7 +22,7 @@ from typing import Optional
 
 import aiohttp
 
-from lib.tadoku_auth import KratosAuth, TadokuAuthError
+from lib.tadoku_auth import TadokuAuth, TadokuAuthError
 
 # Root of every request. Individual functions append their endpoint path.
 BASE_URL = "https://tadoku.app/api/internal/immersion"
@@ -33,15 +33,15 @@ BASE_URL = "https://tadoku.app/api/internal/immersion"
 REQUEST_TIMEOUT = aiohttp.ClientTimeout(total=10)
 
 # Statuses that mean "your session lapsed": re-login once and retry.
-_AUTH_STATUSES = (401, 403)
+_AUTH_STATUSES = (401,)
 
 # The installed login-session manager, or None for anonymous access. Set once at
 # startup via ``configure_auth``.
-_auth: Optional[KratosAuth] = None
+_auth: Optional[TadokuAuth] = None
 
 
-def configure_auth(auth: Optional[KratosAuth]) -> None:
-    """Install (or clear) the Kratos login-session manager used by every request."""
+def configure_auth(auth: Optional[TadokuAuth]) -> None:
+    """Install (or clear) the native Tadoku session manager used by every request."""
     global _auth
     _auth = auth
 
@@ -65,7 +65,7 @@ def _stringify_query_value(value):
     return str(value).lower() if isinstance(value, bool) else value
 
 
-async def _fetch(session: aiohttp.ClientSession, url: str, params: dict) -> tuple[int, object]:
+async def _fetch(session: aiohttp.ClientSession, url: str, params: dict, *, token: str | None = None) -> tuple[int, object]:
     """Do one GET; return ``(status, json_body_or_None)``.
 
     Only 200 responses carry a parsed body; other statuses return ``None`` so the
@@ -73,11 +73,14 @@ async def _fetch(session: aiohttp.ClientSession, url: str, params: dict) -> tupl
     into ``TadokuAPIError``.
     """
     try:
-        async with session.get(url, params=params, timeout=REQUEST_TIMEOUT) as resp:
+        async with session.get(
+            url, params=params, timeout=REQUEST_TIMEOUT, allow_redirects=False,
+            cookies={"tadoku_session": token} if token else {},
+        ) as resp:
             if resp.status == 200:
                 return 200, await resp.json()
             return resp.status, None
-    except aiohttp.ClientError as e:
+    except (aiohttp.ClientError, TimeoutError) as e:
         # Connection refused, DNS failure, timeout, etc. -- collapse the
         # aiohttp-specific exception into our single error type.
         raise TadokuAPIError(f"Could not reach tadoku.app: {e}") from e
@@ -89,7 +92,7 @@ async def _get(session: aiohttp.ClientSession, path: str, params: dict | None = 
     Drops any params whose value is ``None`` (so callers can pass optional
     filters unconditionally) and normalises the rest via
     ``_stringify_query_value``. When authentication is configured the request
-    carries the login session cookie, and a 401/403 (a lapsed session) triggers a
+    carries the login session cookie, and a 401 (a lapsed session) triggers a
     re-login and a single retry. Any other non-200 status or transport error is
     surfaced as a ``TadokuAPIError``.
     """
@@ -103,22 +106,23 @@ async def _get(session: aiohttp.ClientSession, path: str, params: dict | None = 
     }
     url = f"{BASE_URL}{path}"
 
+    generation = token = None
     # Make sure we're logged in before the first call (if auth is configured).
     if _auth is not None:
         try:
-            await _auth.ensure_login(session)
+            generation, token = await _auth.ensure_login(session)
         except TadokuAuthError as e:
             raise TadokuAPIError(f"tadoku.app login failed: {e}") from e
 
-    status, body = await _fetch(session, url, params)
+    status, body = await _fetch(session, url, params, token=token)
 
-    # A lapsed session comes back 401/403: refresh it once and retry.
+    # A lapsed session comes back 401: refresh it once and retry.
     if status in _AUTH_STATUSES and _auth is not None:
         try:
-            await _auth.ensure_login(session, force=True)
+            generation, token = await _auth.ensure_login(session, rejected_generation=generation)
         except TadokuAuthError as e:
             raise TadokuAPIError(f"tadoku.app login failed: {e}") from e
-        status, body = await _fetch(session, url, params)
+        status, body = await _fetch(session, url, params, token=token)
 
     # The API returns 200 on success and 404 for unknown contests/paths; treat
     # anything other than 200 as an error the caller must handle.
