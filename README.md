@@ -80,10 +80,16 @@ starting the next midnight — no need to run `/alerts on` again.
 ## Live log feed
 
 `/log on channel:#somewhere` turns on a live feed of the server's current contest: every **1
-minute** the bot checks tadoku.app for new logs and posts each one — who logged it, what they
-logged (activity, amount or tracked duration, title, language), and the points — to the channel as
-an embed **card**, one per log, colour-coded by activity. Listening totals combine legacy
-minute-unit logs with Tadoku's newer time-tracked listening sessions.
+minute** the bot reads the contest's event feed on tadoku.app and posts each newly submitted log —
+who logged it, what they logged (activity, amount or tracked duration, title, language), and the
+points — to the channel as an embed **card**, one per log, colour-coded by activity. Listening
+totals combine legacy minute-unit logs with Tadoku's newer time-tracked listening sessions.
+
+The channel stays in sync with tadoku.app. When a posted log is edited (title, amount, tags, or its
+contest score), its card is edited in place — re-rendered with the log's and the logger's current
+numbers — and the links beneath it follow. When a log is withdrawn from the contest or deleted, its
+card and links are deleted. If someone deletes a card by hand, the bot stops following that log
+instead of reposting it.
 
 If the logger has linked their Discord account with [`/claim`](#discord--tadoku-matching), the log
 instead posts as a rendered **profile card image** (dark-themed): their Discord avatar, their
@@ -115,10 +121,15 @@ from below — with their avatar and new rank. It compares the live top 20 again
 positions, so the first check after enabling (or after `/set_contest` changes the contest) only sets a
 baseline and posts nothing. At most a few cards fire per poll so a big reshuffle can't flood the feed.
 
-Only logs made *after* you run `/log on` are posted (no backlog dump); a per-server high-water mark
-keeps it from repeating. A burst is capped per poll with an "…and N more" note. `/log off` stops it;
-`/log status` shows the channel. Defaults to the channel you run `/log on` in, and the bot must be
-able to post there.
+Only logs submitted *after* the feed starts are posted (no backlog dump), including an existing log
+that is submitted to the contest later. The bot remembers its place in the event feed and which
+message belongs to which log, so after a restart it picks up exactly where it stopped, edits and
+deletions made while it was offline included. A burst posts at most 20 logs per poll; the rest follow
+on the next polls instead of being dropped. `/log off` stops it; turning it back on skips whatever
+happened while it was off, but cards already posted keep following their logs. Switching contests
+(`/set_contest`, or a new official round) starts the new contest from now and leaves the old
+contest's cards as they are. `/log status` shows the channel. Defaults to the channel you run
+`/log on` in, and the bot must be able to post there.
 
 ## Discord ↔ Tadoku matching
 

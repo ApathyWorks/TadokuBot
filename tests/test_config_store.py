@@ -266,33 +266,63 @@ def test_get_guild_logfeed_defaults_when_unset():
     assert config_store.get_guild_logfeed(1) == {
         "enabled": False,
         "channel_id": None,
-        "last_seen": None,
         "rank_snapshot": None,
+        "stream": None,
     }
 
 
+STREAM = {
+    "contest_id": "c1",
+    "cursor": "e1",
+    "messages": {"l1": {"channel_id": 42, "card": 1001, "links": None}},
+}
+
+
 def test_set_and_get_logfeed_round_trip():
-    config_store.set_guild_logfeed(1, enabled=True, channel_id=42, last_seen="2026-07-05T20:00:00Z")
+    config_store.set_guild_logfeed(1, enabled=True, channel_id=42, stream=STREAM)
 
     assert config_store.get_guild_logfeed(1) == {
         "enabled": True,
         "channel_id": 42,
-        "last_seen": "2026-07-05T20:00:00Z",
         "rank_snapshot": None,
+        "stream": STREAM,
     }
 
 
 def test_set_logfeed_merges_partial_updates():
-    config_store.set_guild_logfeed(1, enabled=True, channel_id=42, last_seen="2026-07-05T20:00:00Z")
-    # Bumping only last_seen keeps enabled/channel_id.
-    config_store.set_guild_logfeed(1, last_seen="2026-07-05T21:00:00Z")
+    config_store.set_guild_logfeed(1, enabled=True, channel_id=42, stream=STREAM)
+    # Bumping only the stream keeps enabled/channel_id.
+    advanced = {**STREAM, "cursor": "e2"}
+    config_store.set_guild_logfeed(1, stream=advanced)
 
     assert config_store.get_guild_logfeed(1) == {
         "enabled": True,
         "channel_id": 42,
-        "last_seen": "2026-07-05T21:00:00Z",
         "rank_snapshot": None,
+        "stream": advanced,
     }
+
+
+def test_logfeed_rejects_retired_last_seen_field():
+    with pytest.raises(ValueError):
+        config_store.set_guild_logfeed(1, last_seen="2026-07-05T20:00:00Z")
+
+
+def test_legacy_logfeed_with_last_seen_still_loads():
+    # A config written by the timestamp poller: last_seen, no stream.
+    config_store._write({"1": {"logfeed": {
+        "enabled": True, "channel_id": 42, "last_seen": "2026-07-05T20:00:00Z",
+    }}})
+
+    assert config_store.get_guild_logfeed(1) == {
+        "enabled": True,
+        "channel_id": 42,
+        "rank_snapshot": None,
+        "stream": None,
+    }
+    # Writing the new field keeps the admin's choices.
+    config_store.set_guild_logfeed(1, stream=STREAM)
+    assert config_store.get_guild_logfeed(1)["channel_id"] == 42
 
 
 def test_logfeed_rank_snapshot_round_trips():

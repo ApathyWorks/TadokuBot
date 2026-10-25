@@ -164,6 +164,82 @@ async def test_list_user_logs_returns_envelope_and_sends_paging(tadoku_server):
     assert query == {"page": "1", "page_size": "100"}
 
 
+async def test_get_contest_events_returns_page_and_sends_cursor_and_limit(tadoku_server):
+    page = {
+        "events": [{"id": "e1", "log_id": "l1", "event": "log.submitted",
+                    "occurred_at": "2026-10-24T11:59:38.602024Z"}],
+        "next_cursor": "e1",
+        "has_more": False,
+    }
+    tadoku_server.set_response("/contests/abc-123/events", 200, page)
+
+    async with aiohttp.ClientSession() as session:
+        data = await tadoku.get_contest_events(session, "abc-123", cursor="e0", limit=50)
+
+    assert data == page
+    assert tadoku_server.requests == [("/contests/abc-123/events", {"cursor": "e0", "limit": "50"})]
+
+
+async def test_get_contest_events_raises_with_status_on_bad_cursor(tadoku_server):
+    tadoku_server.set_response("/contests/abc-123/events", 400, {"error": "bad cursor"})
+
+    async with aiohttp.ClientSession() as session:
+        with pytest.raises(tadoku.TadokuAPIError) as err:
+            await tadoku.get_contest_events(session, "abc-123", cursor="garbage")
+
+    assert err.value.status == 400
+
+
+async def test_get_contest_log_returns_current_log(tadoku_server):
+    log = {"id": "l1", "user_display_name": "mudang", "score": 50.4}
+    tadoku_server.set_response("/contests/abc-123/logs/l1", 200, log)
+
+    async with aiohttp.ClientSession() as session:
+        assert await tadoku.get_contest_log(session, "abc-123", "l1") == log
+
+    assert tadoku_server.requests == [("/contests/abc-123/logs/l1", {})]
+
+
+async def test_get_contest_log_returns_none_when_log_left_the_contest(tadoku_server):
+    tadoku_server.set_response("/contests/abc-123/logs/gone", 404, {"error": "not found"})
+
+    async with aiohttp.ClientSession() as session:
+        assert await tadoku.get_contest_log(session, "abc-123", "gone") is None
+
+
+@pytest.mark.parametrize("status", [400, 403, 500])
+async def test_get_contest_log_raises_on_non_404_errors(tadoku_server, status):
+    # Only "not in the contest" means withdrawn; anything else must not look like it.
+    tadoku_server.set_response("/contests/abc-123/logs/l1", status, {})
+
+    async with aiohttp.ClientSession() as session:
+        with pytest.raises(tadoku.TadokuAPIError) as err:
+            await tadoku.get_contest_log(session, "abc-123", "l1")
+
+    assert err.value.status == status
+
+
+async def test_get_contest_log_raises_when_still_unauthorized_after_relogin(monkeypatch):
+    monkeypatch.setattr(tadoku, "_auth", _fake_auth())
+    monkeypatch.setattr(tadoku, "_fetch", AsyncMock(side_effect=[(401, None), (401, None)]))
+
+    with pytest.raises(tadoku.TadokuAPIError) as err:
+        await tadoku.get_contest_log(SimpleNamespace(), "abc-123", "l1")
+
+    assert err.value.status == 401
+
+
+async def test_transport_failure_has_no_status(monkeypatch):
+    async def _boom(*args, **kwargs):
+        raise tadoku.TadokuAPIError("Could not reach tadoku.app: boom")
+    monkeypatch.setattr(tadoku, "_fetch", _boom)
+
+    with pytest.raises(tadoku.TadokuAPIError) as err:
+        await tadoku.get_contest_log(SimpleNamespace(), "abc-123", "l1")
+
+    assert err.value.status is None
+
+
 # ---------------------------------------------------------------------------
 # authentication (native session): login-before-first-call + 401 retry
 # ---------------------------------------------------------------------------
@@ -239,5 +315,6 @@ async def test_get_surfaces_login_failure_as_api_error(monkeypatch):
     monkeypatch.setattr(tadoku, "_auth", auth)
     monkeypatch.setattr(tadoku, "_fetch", AsyncMock(return_value=(200, {})))
 
-    with pytest.raises(tadoku.TadokuAPIError):
+    with pytest.raises(tadoku.TadokuAPIError) as err:
         await tadoku._get(SimpleNamespace(), "/x")
+    assert err.value.status is None

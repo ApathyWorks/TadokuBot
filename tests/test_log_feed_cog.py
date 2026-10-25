@@ -1,9 +1,11 @@
 """Tests for the log-feed cog (the /log group + the 1-minute poller).
 
 The tadoku client and the contest resolver are mocked; the poller's testable
-core ``_poll_guild`` is driven directly with injected logs and a fixed
-``last_seen`` marker, and cog callbacks are invoked directly with a fake
-interaction -- no live Discord, no wall clock, no live loop.
+core ``_poll_guild`` is driven directly with logs served as fresh
+``log.submitted`` events (``_feed``), and cog callbacks are invoked directly
+with a fake interaction -- no live Discord, no wall clock, no live loop. These
+cover what a card shows; the event lifecycle (edits, deletions, cursor) is
+exercised end to end in ``test_log_feed_events.py``.
 """
 
 from types import SimpleNamespace
@@ -30,7 +32,12 @@ def patched(monkeypatch):
     # Empty config store -> _resolve_contest falls back to latest-official.
     monkeypatch.setattr(tadoku_client, "get_latest_official_contest", AsyncMock(return_value=CONTEST))
     monkeypatch.setattr(tadoku_client, "get_contest", AsyncMock(return_value=CONTEST))
-    monkeypatch.setattr(tadoku_client, "list_contest_logs", AsyncMock(return_value=[]))
+    # The event feed: nothing new unless a test serves logs via _feed().
+    monkeypatch.setattr(
+        tadoku_client, "get_contest_events",
+        AsyncMock(return_value={"events": [], "next_cursor": "e0", "has_more": False}),
+    )
+    monkeypatch.setattr(tadoku_client, "get_contest_log", AsyncMock(return_value=None))
     # Per-user contest-stats lookup; empty by default so claimed-logger cards show
     # zero stats unless a test provides history.
     monkeypatch.setattr(
@@ -60,15 +67,34 @@ def _log(created_at, name="ruby", score=10, deleted=False, activity="Reading",
     }
 
 
-def _pager(pages):
-    def _serve(session, contest_id, *, page, page_size):
-        return pages.get(page, [])
-    return _serve
+def _feed(*logs, guild=999, **settings):
+    """Turn the feed on in channel 555 and serve ``logs`` (oldest first) as new
+    ``log.submitted`` events after the saved cursor ``e0``."""
+    for i, log in enumerate(logs):
+        log.setdefault("id", f"log-{i}")
+    config_store.set_guild_logfeed(
+        guild, enabled=True, channel_id=555,
+        stream={"contest_id": "c1", "cursor": "e0", "messages": {}}, **settings,
+    )
+    tadoku_client.get_contest_events.return_value = {
+        "events": [{"id": f"e{i + 1}", "log_id": log["id"], "event": "log.submitted",
+                    "occurred_at": log["created_at"]} for i, log in enumerate(logs)],
+        "next_cursor": f"e{len(logs)}" if logs else "e0",
+        "has_more": False,
+    }
+    by_id = {log["id"]: log for log in logs}
+    tadoku_client.get_contest_log.side_effect = lambda session, contest_id, log_id: by_id.get(log_id)
+
+
+def _cursor(guild=999):
+    return (config_store.get_guild_logfeed(guild)["stream"] or {}).get("cursor")
 
 
 def _channel(cid=555, mention="#feed", can_send=True):
     perms = SimpleNamespace(send_messages=can_send)
-    return SimpleNamespace(id=cid, mention=mention, send=AsyncMock(), permissions_for=lambda m: perms)
+    ids = iter(range(1001, 2000))
+    send = AsyncMock(side_effect=lambda *args, **kwargs: SimpleNamespace(id=next(ids)))
+    return SimpleNamespace(id=cid, mention=mention, send=send, permissions_for=lambda m: perms)
 
 
 def _bot_with_channel(channel):
@@ -261,64 +287,23 @@ def test_description_urls_handle_prose_and_markup(description, expected):
 # _poll_guild
 # ---------------------------------------------------------------------------
 
-async def test_poll_posts_new_logs_oldest_first_skipping_deleted():
+async def test_poll_does_nothing_when_no_new_events():
     channel = _channel(cid=555)
     bot = _bot_with_channel(channel)
-    config_store.set_guild_logfeed(999, enabled=True, channel_id=555, last_seen=CUTOFF)
-    # Newest-first, as the API returns them.
-    tadoku_client.list_contest_logs.side_effect = _pager({0: [
-        _log("2026-07-05T21:00:00Z", name="late"),
-        _log("2026-07-05T20:30:00Z", name="gone", deleted=True),
-        _log("2026-07-05T20:10:00Z", name="early"),
-        _log("2026-07-05T19:00:00Z", name="old"),  # <= cutoff -> stop
-    ]})
-    cog = log_feed.LogFeed(bot)
-
-    await cog._poll_guild(999)
-
-    assert channel.send.await_count == 2  # "old" excluded, "gone" deleted
-    first, second = [c.kwargs["embed"] for c in channel.send.await_args_list]
-    assert first.author.name == "early" and second.author.name == "late"  # chronological
-    # Marker advanced to the newest log.
-    assert config_store.get_guild_logfeed(999)["last_seen"] == "2026-07-05T21:00:00Z"
-
-
-async def test_poll_excludes_the_log_exactly_at_the_marker():
-    # A log whose created_at equals last_seen was already the high-water mark and
-    # must not be re-posted (guards the <= vs < boundary).
-    channel = _channel(cid=555)
-    bot = _bot_with_channel(channel)
-    config_store.set_guild_logfeed(999, enabled=True, channel_id=555, last_seen=CUTOFF)
-    tadoku_client.list_contest_logs.side_effect = _pager({0: [
-        _log("2026-07-05T21:00:00Z", name="new"),
-        _log(CUTOFF, name="marker"),  # exactly at the mark -> already seen
-    ]})
-    cog = log_feed.LogFeed(bot)
-
-    await cog._poll_guild(999)
-
-    assert channel.send.await_count == 1
-    assert channel.send.await_args_list[0].kwargs["embed"].author.name == "new"
-
-
-async def test_poll_does_nothing_when_no_new_logs():
-    channel = _channel(cid=555)
-    bot = _bot_with_channel(channel)
-    config_store.set_guild_logfeed(999, enabled=True, channel_id=555, last_seen=CUTOFF)
-    tadoku_client.list_contest_logs.side_effect = _pager({0: [_log("2026-07-05T19:00:00Z")]})
+    _feed()
     cog = log_feed.LogFeed(bot)
 
     await cog._poll_guild(999)
 
     channel.send.assert_not_awaited()
-    assert config_store.get_guild_logfeed(999)["last_seen"] == CUTOFF  # unchanged
+    assert _cursor() == "e0"  # unchanged
 
 
 async def test_poll_is_noop_when_disabled():
     channel = _channel(cid=555)
     bot = _bot_with_channel(channel)
-    config_store.set_guild_logfeed(999, enabled=False, channel_id=555, last_seen=CUTOFF)
-    tadoku_client.list_contest_logs.side_effect = _pager({0: [_log("2026-07-05T21:00:00Z")]})
+    _feed(_log("2026-07-05T21:00:00Z"))
+    config_store.set_guild_logfeed(999, enabled=False)
     cog = log_feed.LogFeed(bot)
 
     await cog._poll_guild(999)
@@ -328,65 +313,23 @@ async def test_poll_is_noop_when_disabled():
 
 async def test_poll_is_noop_when_no_channel():
     bot = _bot_with_channel(_channel())
-    config_store.set_guild_logfeed(999, enabled=True, last_seen=CUTOFF)  # channel_id absent
+    config_store.set_guild_logfeed(999, enabled=True)  # channel_id absent
     cog = log_feed.LogFeed(bot)
 
     await cog._poll_guild(999)  # must not raise / post
 
 
-async def test_poll_seeds_marker_when_missing_and_posts_nothing():
+async def test_poll_keeps_cursor_and_retries_on_api_error():
     channel = _channel(cid=555)
     bot = _bot_with_channel(channel)
-    config_store.set_guild_logfeed(999, enabled=True, channel_id=555)  # no last_seen
-    cog = log_feed.LogFeed(bot)
-
-    await cog._poll_guild(999)
-
-    channel.send.assert_not_awaited()
-    assert config_store.get_guild_logfeed(999)["last_seen"] is not None
-
-
-async def test_poll_leaves_marker_and_retries_on_api_error():
-    channel = _channel(cid=555)
-    bot = _bot_with_channel(channel)
-    config_store.set_guild_logfeed(999, enabled=True, channel_id=555, last_seen=CUTOFF)
-    tadoku_client.list_contest_logs.side_effect = tadoku_client.TadokuAPIError("boom")
+    _feed()
+    tadoku_client.get_contest_events.side_effect = tadoku_client.TadokuAPIError("boom")
     cog = log_feed.LogFeed(bot)
 
     await cog._poll_guild(999)  # must not raise
 
     channel.send.assert_not_awaited()
-    assert config_store.get_guild_logfeed(999)["last_seen"] == CUTOFF  # untouched
-
-
-async def test_poll_caps_burst_with_overflow_note():
-    channel = _channel(cid=555)
-    bot = _bot_with_channel(channel)
-    config_store.set_guild_logfeed(999, enabled=True, channel_id=555, last_seen=CUTOFF)
-    # 25 new logs (a short page, so the scan stops after page 0).
-    burst = [_log(f"2026-07-05T21:{i:02d}:00Z", name=f"u{i}") for i in range(25)]
-    tadoku_client.list_contest_logs.side_effect = _pager({0: burst})
-    cog = log_feed.LogFeed(bot)
-
-    await cog._poll_guild(999)
-
-    # 20 posts + 1 overflow note.
-    assert channel.send.await_count == log_feed.MAX_POSTS_PER_POLL + 1
-    assert "5 more" in channel.send.await_args_list[-1].args[0]
-
-
-async def test_poll_pages_past_a_full_page_to_reach_the_marker():
-    channel = _channel(cid=555)
-    bot = _bot_with_channel(channel)
-    config_store.set_guild_logfeed(999, enabled=True, channel_id=555, last_seen=CUTOFF)
-    full = [_log(f"2026-07-05T22:{i // 60:02d}:{i % 60:02d}Z", name=f"a{i}")
-            for i in range(log_feed.LOG_PAGE_SIZE)]  # all newer than cutoff, full page
-    tadoku_client.list_contest_logs.side_effect = _pager({0: full, 1: [_log("2026-07-05T19:00:00Z")]})
-    cog = log_feed.LogFeed(bot)
-
-    await cog._poll_guild(999)
-
-    assert tadoku_client.list_contest_logs.await_count == 2  # had to fetch page 1
+    assert _cursor() == "e0"  # untouched
 
 
 # ---------------------------------------------------------------------------
@@ -402,11 +345,10 @@ async def test_poll_renders_image_card_for_claimed_logger():
     channel = _channel(cid=555)
     bot = _bot_with_channel(channel)
     bot.get_user = lambda uid: _user_with_avatar(b"AV") if uid == 111 else None
-    config_store.set_guild_logfeed(999, enabled=True, channel_id=555, last_seen=CUTOFF)
     config_store.set_claim(999, 111, "ruby")  # links "ruby" -> discord user 111
-    tadoku_client.list_contest_logs.side_effect = _pager({0: [
+    _feed(
         _log("2026-07-05T21:00:00Z", name="Ruby ", user_id="uuid-ruby", amount=192, unit="Page", score=192),
-    ]})
+    )
     tadoku_client.list_user_logs.return_value = {
         "logs": [{"unit_name": "Character", "amount": 6_600_000, "deleted": False,
                   "created_at": "2026-07-05T20:00:00Z"}],
@@ -434,11 +376,10 @@ async def test_poll_card_subtitle_shows_contest_place_and_score():
     channel = _channel(cid=555)
     bot = _bot_with_channel(channel)
     bot.get_user = lambda uid: _user_with_avatar() if uid == 111 else None
-    config_store.set_guild_logfeed(999, enabled=True, channel_id=555, last_seen=CUTOFF)
     config_store.set_claim(999, 111, "ruby")
-    tadoku_client.list_contest_logs.side_effect = _pager({0: [
+    _feed(
         _log("2026-07-05T21:00:00Z", name="Ruby ", user_id="u"),
-    ]})
+    )
     # The logger sits 5th on the current contest's leaderboard with 320.5 points.
     tadoku_client.get_contest_leaderboard.return_value = {
         "entries": [{"rank": 5, "user_display_name": "ruby", "score": 320.5, "is_tie": False}],
@@ -455,11 +396,10 @@ async def test_poll_card_subtitle_blank_when_logger_not_on_leaderboard():
     channel = _channel(cid=555)
     bot = _bot_with_channel(channel)
     bot.get_user = lambda uid: _user_with_avatar() if uid == 111 else None
-    config_store.set_guild_logfeed(999, enabled=True, channel_id=555, last_seen=CUTOFF)
     config_store.set_claim(999, 111, "ruby")
-    tadoku_client.list_contest_logs.side_effect = _pager({0: [
+    _feed(
         _log("2026-07-05T21:00:00Z", name="ruby", user_id="u"),
-    ]})
+    )
     # Default fixture leaderboard is empty -> no entry -> blank subtitle.
     cog = log_feed.LogFeed(bot)
 
@@ -472,11 +412,10 @@ async def test_poll_card_draws_the_material_title_on_the_card():
     channel = _channel(cid=555)
     bot = _bot_with_channel(channel)
     bot.get_user = lambda uid: _user_with_avatar() if uid == 111 else None
-    config_store.set_guild_logfeed(999, enabled=True, channel_id=555, last_seen=CUTOFF)
     config_store.set_claim(999, 111, "ruby")
-    tadoku_client.list_contest_logs.side_effect = _pager({0: [
+    _feed(
         _log("2026-07-05T21:00:00Z", name="ruby", user_id="u", description="奇跡を、生きている"),
-    ]})
+    )
     tadoku_client.list_user_logs.return_value = {"logs": [], "total_size": 0}
     cog = log_feed.LogFeed(bot)
 
@@ -492,11 +431,10 @@ async def test_poll_card_fetches_and_passes_poster_for_tagged_log(monkeypatch):
     channel = _channel(cid=555)
     bot = _bot_with_channel(channel)
     bot.get_user = lambda uid: _user_with_avatar() if uid == 111 else None
-    config_store.set_guild_logfeed(999, enabled=True, channel_id=555, last_seen=CUTOFF)
     config_store.set_claim(999, 111, "ruby")
     log = _log("2026-07-05T21:00:00Z", name="ruby", user_id="u", description="Summer Pockets")
     log["tags"] = ["fiction", "game"]
-    tadoku_client.list_contest_logs.side_effect = _pager({0: [log]})
+    _feed(log)
     tadoku_client.list_user_logs.return_value = {"logs": [], "total_size": 0}
     fetch = AsyncMock(return_value=b"POSTERBYTES")
     monkeypatch.setattr(log_feed.poster_client, "fetch_poster", fetch)
@@ -515,11 +453,10 @@ async def test_poll_card_tolerates_poster_lookup_failure(monkeypatch):
     channel = _channel(cid=555)
     bot = _bot_with_channel(channel)
     bot.get_user = lambda uid: _user_with_avatar() if uid == 111 else None
-    config_store.set_guild_logfeed(999, enabled=True, channel_id=555, last_seen=CUTOFF)
     config_store.set_claim(999, 111, "ruby")
     log = _log("2026-07-05T21:00:00Z", name="ruby", user_id="u", description="X")
     log["tags"] = ["anime"]
-    tadoku_client.list_contest_logs.side_effect = _pager({0: [log]})
+    _feed(log)
     tadoku_client.list_user_logs.return_value = {"logs": [], "total_size": 0}
     monkeypatch.setattr(
         log_feed.poster_client, "fetch_poster", AsyncMock(side_effect=RuntimeError("boom"))
@@ -536,10 +473,9 @@ async def test_poll_card_tolerates_poster_lookup_failure(monkeypatch):
 async def test_poll_plain_embed_for_unclaimed_logger():
     channel = _channel(cid=555)
     bot = _bot_with_channel(channel)  # unclaimed short-circuits before any user/lifetime lookup
-    config_store.set_guild_logfeed(999, enabled=True, channel_id=555, last_seen=CUTOFF)
-    tadoku_client.list_contest_logs.side_effect = _pager({0: [
+    _feed(
         _log("2026-07-05T21:00:00Z", name="nobody", user_id="u"),
-    ]})
+    )
     cog = log_feed.LogFeed(bot)
 
     await cog._poll_guild(999)
@@ -554,11 +490,10 @@ async def test_poll_plain_embed_for_unclaimed_logger():
 async def test_poll_posts_youtube_url_under_the_card():
     channel = _channel(cid=555)
     bot = _bot_with_channel(channel)
-    config_store.set_guild_logfeed(999, enabled=True, channel_id=555, last_seen=CUTOFF)
-    tadoku_client.list_contest_logs.side_effect = _pager({0: [
+    _feed(
         _log("2026-07-05T21:00:00Z", name="nobody", user_id="u",
              tags=["youtube"], description="すごい動画 https://youtu.be/xyz"),
-    ]})
+    )
     cog = log_feed.LogFeed(bot)
 
     await cog._poll_guild(999)
@@ -572,11 +507,10 @@ async def test_poll_posts_youtube_url_under_the_card():
 async def test_poll_posts_all_description_urls_in_one_follow_up():
     channel = _channel(cid=555)
     bot = _bot_with_channel(channel)
-    config_store.set_guild_logfeed(999, enabled=True, channel_id=555, last_seen=CUTOFF)
-    tadoku_client.list_contest_logs.side_effect = _pager({0: [
+    _feed(
         _log("2026-07-05T21:00:00Z", name="nobody", user_id="u",
              tags=["youtube"], description="https://youtu.be/one https://youtu.be/two"),
-    ]})
+    )
     cog = log_feed.LogFeed(bot)
 
     await cog._poll_guild(999)
@@ -593,10 +527,9 @@ async def test_poll_posts_all_description_urls_in_one_follow_up():
 async def test_poll_posts_description_links_and_suppresses_nsfw_previews(tags, suppress):
     channel = _channel(cid=555)
     bot = _bot_with_channel(channel)
-    config_store.set_guild_logfeed(999, enabled=True, channel_id=555, last_seen=CUTOFF)
-    tadoku_client.list_contest_logs.side_effect = _pager({0: [
+    _feed(
         _log("2026-07-05T21:00:00Z", tags=tags, description="title https://example.com/book https://youtu.be/x"),
-    ]})
+    )
     cog = log_feed.LogFeed(bot)
 
     await cog._poll_guild(999)
@@ -611,11 +544,10 @@ async def test_poll_falls_back_to_embed_when_contest_stats_lookup_fails():
     channel = _channel(cid=555)
     bot = _bot_with_channel(channel)
     bot.get_user = lambda uid: _user_with_avatar() if uid == 111 else None
-    config_store.set_guild_logfeed(999, enabled=True, channel_id=555, last_seen=CUTOFF)
     config_store.set_claim(999, 111, "ruby")
-    tadoku_client.list_contest_logs.side_effect = _pager({0: [
+    _feed(
         _log("2026-07-05T21:00:00Z", name="ruby", user_id="u"),
-    ]})
+    )
     tadoku_client.list_user_logs.side_effect = tadoku_client.TadokuAPIError("boom")
     cog = log_feed.LogFeed(bot)
 
@@ -632,12 +564,11 @@ async def test_poll_fetches_avatar_via_fetch_user_and_only_once():
     bot = _bot_with_channel(channel)
     bot.get_user = lambda uid: None
     bot.fetch_user = AsyncMock(return_value=_user_with_avatar(b"AV"))
-    config_store.set_guild_logfeed(999, enabled=True, channel_id=555, last_seen=CUTOFF)
     config_store.set_claim(999, 111, "ruby")
-    tadoku_client.list_contest_logs.side_effect = _pager({0: [
+    _feed(
         _log("2026-07-05T21:05:00Z", name="ruby", user_id="u"),
         _log("2026-07-05T21:00:00Z", name="ruby", user_id="u"),
-    ]})
+    )
     cog = log_feed.LogFeed(bot)
 
     await cog._poll_guild(999)
@@ -651,11 +582,10 @@ async def test_poll_card_uses_placeholder_when_avatar_read_fails():
     bot = _bot_with_channel(channel)
     failing = SimpleNamespace(display_avatar=SimpleNamespace(read=AsyncMock(side_effect=_http_error())))
     bot.get_user = lambda uid: failing if uid == 111 else None
-    config_store.set_guild_logfeed(999, enabled=True, channel_id=555, last_seen=CUTOFF)
     config_store.set_claim(999, 111, "ruby")
-    tadoku_client.list_contest_logs.side_effect = _pager({0: [
+    _feed(
         _log("2026-07-05T21:00:00Z", name="ruby", user_id="u"),
-    ]})
+    )
     cog = log_feed.LogFeed(bot)
 
     await cog._poll_guild(999)  # must not raise
@@ -667,16 +597,15 @@ async def test_poll_card_uses_placeholder_when_avatar_read_fails():
 
 async def test_poll_falls_back_to_embed_when_card_render_raises(monkeypatch):
     # A render crash for one log must NOT freeze the guild's feed: it degrades to
-    # the plain embed, the poll completes, and last_seen still advances.
+    # the plain embed, the poll completes, and the cursor still advances.
     monkeypatch.setattr(profile_card, "render_card", AsyncMock(side_effect=ValueError("boom")))
     channel = _channel(cid=555)
     bot = _bot_with_channel(channel)
     bot.get_user = lambda uid: _user_with_avatar() if uid == 111 else None
-    config_store.set_guild_logfeed(999, enabled=True, channel_id=555, last_seen=CUTOFF)
     config_store.set_claim(999, 111, "ruby")
-    tadoku_client.list_contest_logs.side_effect = _pager({0: [
+    _feed(
         _log("2026-07-05T21:00:00Z", name="ruby", user_id="u"),
-    ]})
+    )
     tadoku_client.list_user_logs.return_value = {"logs": [], "total_size": 0}
     cog = log_feed.LogFeed(bot)
 
@@ -685,8 +614,8 @@ async def test_poll_falls_back_to_embed_when_card_render_raises(monkeypatch):
     sent = _sent(channel)
     assert sent.get("file") is None
     assert sent["embed"] is not None  # degraded to the plain embed
-    # Poll completed, so the high-water mark advanced (feed not frozen).
-    assert config_store.get_guild_logfeed(999)["last_seen"] == "2026-07-05T21:00:00Z"
+    # Poll completed, so the cursor advanced (feed not frozen).
+    assert _cursor() == "e1"
 
 
 # ---------------------------------------------------------------------------
@@ -850,7 +779,7 @@ def _guild_interaction(guild_id=999):
     return interaction
 
 
-async def test_log_on_enables_seeds_marker_and_stores_channel():
+async def test_log_on_enables_and_stores_channel():
     cog = log_feed.LogFeed(SimpleNamespace())
     interaction = _guild_interaction()
     interaction.channel = _channel(cid=555)
@@ -860,7 +789,7 @@ async def test_log_on_enables_seeds_marker_and_stores_channel():
     settings = config_store.get_guild_logfeed(999)
     assert settings["enabled"] is True
     assert settings["channel_id"] == 555
-    assert settings["last_seen"] is not None  # seeded so no backlog dump
+    assert settings["stream"] is None  # the next poll seeds it at "now" (no backlog dump)
     args, kwargs = interaction.response.send_message.await_args
     assert kwargs.get("ephemeral") is True
     assert "on" in args[0]
@@ -979,14 +908,11 @@ async def test_poll_posts_a_rank_up_card_when_a_logger_climbs():
     channel = _channel(cid=555)
     bot = _bot_with_channel(channel)
     bot.get_user = lambda uid: _user_with_avatar(b"AV") if uid == 111 else None
-    config_store.set_guild_logfeed(
-        999, enabled=True, channel_id=555, last_seen=CUTOFF,
+    config_store.set_claim(999, 111, "ruby")
+    _feed(
+        _log("2026-07-05T21:00:00Z", name="ruby", user_id="uuid-ruby"),
         rank_snapshot={"contest_id": "c1", "ranks": {"uuid-ruby": 5}},  # ruby was #5
     )
-    config_store.set_claim(999, 111, "ruby")
-    tadoku_client.list_contest_logs.side_effect = _pager({0: [
-        _log("2026-07-05T21:00:00Z", name="ruby", user_id="uuid-ruby"),
-    ]})
     tadoku_client.get_contest_leaderboard.return_value = {"entries": _lb(
         (1, "x", "top"), (2, "y", "anja"), (3, "uuid-ruby", "ruby"), (4, "z", "ryun"),
     ), "total_size": 4}
@@ -1005,10 +931,9 @@ async def test_poll_posts_a_rank_up_card_when_a_logger_climbs():
 async def test_poll_first_baseline_seeds_snapshot_without_callouts():
     channel = _channel(cid=555)
     bot = _bot_with_channel(channel)
-    config_store.set_guild_logfeed(999, enabled=True, channel_id=555, last_seen=CUTOFF)  # no snapshot
-    tadoku_client.list_contest_logs.side_effect = _pager({0: [
+    _feed(  # no rank snapshot yet
         _log("2026-07-05T21:00:00Z", name="ruby", user_id="uuid-ruby"),
-    ]})
+    )
     tadoku_client.get_contest_leaderboard.return_value = {"entries": _lb(
         (1, "uuid-ruby", "ruby"), (2, "y", "anja"),
     ), "total_size": 2}
