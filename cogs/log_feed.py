@@ -146,18 +146,28 @@ def _contest_window(contest: dict) -> tuple[datetime, datetime]:
     return _midnight(contest["contest_start"]), _midnight(contest["contest_end"]) + timedelta(days=1)
 
 
+# Tags that make a Reading "Page" log a comic page, mirroring tadoku's scoring
+# rules (which lowercase and trim tags before matching).
+COMIC_TAGS = {"comic", "manga"}
+
+
+def _is_comic(log: dict) -> bool:
+    return any(str(tag).strip().casefold() in COMIC_TAGS for tag in log.get("tags") or [])
+
+
 async def compute_window_totals(session, user_id: str, start, end) -> dict:
     """Sum a user's logs in the half-open window ``[start, end)`` into characters /
     pages / comic pages / listening minutes.
 
     Buckets each non-deleted log by its tracking data. Amount-based logs use their
-    unit: "character" -> characters, "comic" ("Comic page") -> comic_pages,
-    "page" ("Page") -> pages, and Listening "minute" ("Minute"/"Dense minute")
-    -> listening minutes. Newer time-tracked Listening logs instead expose
-    ``duration_seconds`` with no meaningful amount/unit, which is converted to
-    minutes. If a Listening log contains both forms, duration wins so the same
-    session is not counted twice. ``comic`` is checked before ``page`` since
-    "Comic page" contains "page". Logs arrive newest-first: any log at/after
+    unit: "character" -> characters, "page" ("Page") -> pages, and Listening
+    "minute" ("Minute"/"Dense minute") -> listening minutes. Comic pages are a
+    Reading "Page" log tagged comic/manga (tadoku's logging v2 scores them by tag),
+    plus pre-v2 logs in the retired "Comic page" unit. Newer time-tracked Listening
+    logs instead expose ``duration_seconds`` with no meaningful amount/unit, which
+    is converted to minutes. If a Listening log contains both forms, duration wins
+    so the same session is not counted twice. Comic is checked before ``page``
+    since both are "page" logs. Logs arrive newest-first: any log at/after
     ``end`` is skipped (a later window bound), and the first one before ``start``
     ends the walk (everything before it is out of window too). ``end`` may be
     ``None`` for an open-ended window (up to now). Pages the API by ``total_size``,
@@ -192,7 +202,9 @@ async def compute_window_totals(session, user_id: str, start, end) -> dict:
                 minutes += duration_seconds / 60
             elif "character" in unit:
                 characters += amount
-            elif "comic" in unit:  # "Comic page" -- before the plain "page" check
+            elif "comic" in unit or (  # before the plain "page" check
+                unit == "page" and activity in ("", "reading") and _is_comic(log)
+            ):
                 comic_pages += amount
             elif "page" in unit:
                 pages += amount

@@ -698,9 +698,9 @@ IN_WINDOW = "2026-07-05T20:00:00Z"
 
 
 def _ulog(unit, amount, deleted=False, created_at=IN_WINDOW, *, activity=None,
-          duration_seconds=None):
+          duration_seconds=None, tags=()):
     return {"unit_name": unit, "amount": amount, "deleted": deleted, "created_at": created_at,
-            "activity": activity, "duration_seconds": duration_seconds}
+            "activity": activity, "duration_seconds": duration_seconds, "tags": list(tags)}
 
 
 async def test_compute_contest_totals_sums_by_unit_and_skips_deleted():
@@ -721,6 +721,27 @@ async def test_compute_contest_totals_sums_by_unit_and_skips_deleted():
     stats = await cog._compute_contest_totals("user-1", CONTEST)
 
     assert stats == {"characters": 1000, "pages": 10, "comic_pages": 5, "minutes": 90}
+
+
+async def test_compute_contest_totals_counts_comic_or_manga_tagged_reading_pages_as_comic():
+    # Logging v2 dropped the "Comic page" unit: a comic page is now a Reading log
+    # in "Page" tagged comic/manga (matched case-insensitively, as tadoku scores it).
+    cog = log_feed.LogFeed(SimpleNamespace(session=AsyncMock()))
+    tadoku_client.list_user_logs.return_value = {
+        "logs": [
+            _ulog("Page", 20, activity="Reading", tags=["comic"]),
+            _ulog("Page", 7, activity="Reading", tags=[" Manga ", "fiction"]),
+            _ulog("Page", 3, tags=["manga"]),                         # older payload, no activity
+            _ulog("Comic page", 4, activity="Reading"),               # pre-v2 logs still count
+            _ulog("Page", 10, activity="Reading", tags=["book", "two_column"]),
+            _ulog("Page", 5, activity="Writing", tags=["comic"]),     # only Reading is comic
+        ],
+        "total_size": 6,
+    }
+
+    stats = await cog._compute_contest_totals("user-1", CONTEST)
+
+    assert stats == {"characters": 0, "pages": 15, "comic_pages": 34, "minutes": 0}
 
 
 async def test_compute_contest_totals_combines_legacy_and_time_tracked_listening():
