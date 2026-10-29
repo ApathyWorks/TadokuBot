@@ -131,6 +131,14 @@ happened while it was off, but cards already posted keep following their logs. S
 contest's cards as they are. `/log status` shows the channel. Defaults to the channel you run
 `/log on` in, and the bot must be able to post there.
 
+Tadoku or Discord failures leave the affected event pending for the next poll.
+If posting a card succeeds but its links fail, the saved card is reused on retry.
+After upgrading from the old feed, the first poll starts at the latest event;
+older cards have no stored message IDs and cannot be updated. Initial activation
+also seeds on the first poll, so submissions before that poll may be skipped.
+Events that Tadoku makes visible late behind the saved cursor are not recovered
+by this forward-only feed.
+
 ## Discord ↔ Tadoku matching
 
 Leaderboards automatically omit linked participants who have left this Discord

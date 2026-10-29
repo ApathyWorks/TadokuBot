@@ -482,7 +482,7 @@ class LogFeed(commands.Cog):
         Discord messages (``_sync_log``); only a ``log.submitted`` event may
         create a post, so updates to logs never posted here (e.g. from before
         ``/log on``) are skipped without a lookup. The stream -- cursor and
-        message map -- is saved after every event. A tadoku.app error stops
+        message map -- is saved after every event. A Tadoku or Discord error stops
         right before the failed event, keeping the cursor, so the next poll
         retries it; a rejected cursor is logged, never reset (that would skip
         events). Returns the logs whose cards were posted or edited.
@@ -504,7 +504,14 @@ class LogFeed(commands.Cog):
                         return changed  # the rest of the burst waits for the next poll
                     else:
                         log = await tadoku.get_contest_log(self.bot.session, contest_id, log_id)
-                        synced = await self._sync_log(channel_id, entry, log, render)
+
+                        def checkpoint(new_entry):
+                            # A card can succeed while its links fail. Save the
+                            # card ID with the OLD cursor so retry edits it.
+                            messages[log_id] = new_entry
+                            config_store.set_guild_logfeed(guild_id, stream=stream)
+
+                        synced = await self._sync_log(channel_id, entry, log, render, checkpoint)
                         if synced is None:
                             messages.pop(log_id, None)
                         else:
@@ -516,12 +523,12 @@ class LogFeed(commands.Cog):
                     config_store.set_guild_logfeed(guild_id, stream=stream)
                 if not page["has_more"]:
                     break
-        except tadoku.TadokuAPIError as e:
+        except (tadoku.TadokuAPIError, discord.HTTPException) as e:
             _log.warning("Log feed for guild %s: %s; will retry", guild_id, e)
         return changed
 
     async def _sync_log(
-        self, channel_id: int, entry: Optional[dict], log: Optional[dict], render
+        self, channel_id: int, entry: Optional[dict], log: Optional[dict], render, checkpoint
     ) -> Optional[dict]:
         """Make one log's Discord messages match its current state.
 
@@ -536,20 +543,18 @@ class LogFeed(commands.Cog):
                 await self._delete_log_messages(entry)
             return None
         if entry is None:
-            return await self._post_log(channel_id, log, render)
+            return await self._post_log(channel_id, log, render, checkpoint)
         return await self._edit_log_messages(entry, log, render)
 
-    async def _post_log(self, channel_id: int, log: dict, render) -> Optional[dict]:
+    async def _post_log(self, channel_id: int, log: dict, render, checkpoint) -> dict:
         """Post a log's card, plus its description links beneath it."""
-        channel = await self._channel(channel_id)
-        if channel is None:
-            return None
-        card = await self._send(channel, **await render(log))
-        if card is None:
-            return None
+        channel = await self._sync_channel(channel_id)
+        card = await channel.send(None, **await render(log))
+        entry = {"channel_id": channel_id, "card": card.id, "links": None}
+        checkpoint(entry)
         # Make links clickable even when the description is drawn in an image.
         links = await self._sync_links(channel, None, log)
-        return {"channel_id": channel_id, "card": card.id, "links": links}
+        return {**entry, "links": links}
 
     async def _edit_log_messages(self, entry: dict, log: dict, render) -> Optional[dict]:
         """Re-render a posted log's card in place and sync its links message.
@@ -559,9 +564,7 @@ class LogFeed(commands.Cog):
         card someone deleted by hand takes its links message with it and the log
         is no longer followed, rather than reposted.
         """
-        channel = await self._channel(entry["channel_id"])
-        if channel is None:
-            return entry  # unreachable right now; keep following the log
+        channel = await self._sync_channel(entry["channel_id"])
         message = await render(log)
         try:
             await channel.get_partial_message(entry["card"]).edit(
@@ -571,9 +574,6 @@ class LogFeed(commands.Cog):
         except discord.NotFound:
             await self._delete_log_messages(entry)
             return None
-        except discord.HTTPException:
-            _log.warning("Log feed: couldn't edit message %s", entry["card"])
-            return entry
         return {**entry, "links": await self._sync_links(channel, entry.get("links"), log)}
 
     async def _sync_links(self, channel, links_id: Optional[int], log: dict) -> Optional[int]:
@@ -583,8 +583,8 @@ class LogFeed(commands.Cog):
         if links_id is None:
             if not urls:
                 return None
-            sent = await self._send(channel, content="\n".join(urls), suppress_embeds=_is_nsfw(log))
-            return sent.id if sent else None
+            sent = await channel.send("\n".join(urls), suppress_embeds=_is_nsfw(log))
+            return sent.id
         try:
             if not urls:
                 await channel.get_partial_message(links_id).delete()
@@ -594,15 +594,11 @@ class LogFeed(commands.Cog):
             await message.edit(content="\n".join(urls), suppress=_is_nsfw(log))
         except discord.NotFound:
             return None  # deleted by hand; don't bring it back
-        except discord.HTTPException:
-            _log.warning("Log feed: couldn't update links message %s", links_id)
         return links_id
 
     async def _delete_log_messages(self, entry: dict) -> None:
         """Delete a log's card and links message (already-gone ones are fine)."""
-        channel = await self._channel(entry["channel_id"])
-        if channel is None:
-            return
+        channel = await self._sync_channel(entry["channel_id"])
         for message_id in (entry["card"], entry.get("links")):
             if message_id is None:
                 continue
@@ -610,8 +606,6 @@ class LogFeed(commands.Cog):
                 await channel.get_partial_message(message_id).delete()
             except discord.NotFound:
                 pass
-            except discord.HTTPException:
-                _log.warning("Log feed: couldn't delete message %s", message_id)
 
     async def _post_rank_changes(
         self, guild_id, contest, logs, settings, claims, avatar_cache
@@ -810,6 +804,10 @@ class LogFeed(commands.Cog):
             data = None
         cache[uid] = data
         return data
+
+    async def _sync_channel(self, channel_id: int):
+        """Resolve a sync target; failures must leave its event pending."""
+        return self.bot.get_channel(channel_id) or await self.bot.fetch_channel(channel_id)
 
     async def _channel(self, channel_id: int):
         """Resolve a channel (cache, then a live fetch), or ``None`` if it's gone."""

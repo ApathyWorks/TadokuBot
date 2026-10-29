@@ -564,3 +564,70 @@ async def test_log_on_off_restart_from_now_but_keep_following_posted_cards(world
     await _log_on(world)  # already on (e.g. to confirm the channel): keep the place
     assert _stream().get("cursor") == cursor
     assert "l1" in _stream().get("messages")
+
+
+@pytest.mark.parametrize("operation", ["card_send", "links_send", "card_edit", "links_edit", "card_delete", "links_delete", "channel"])
+async def test_discord_failures_keep_event_pending_until_recovered(world, monkeypatch, operation):
+    await _started(world)
+    log = _log("l1", description="https://example.com/old")
+    if operation not in ("card_send", "links_send", "channel"):
+        world.feed.submit(log)
+        await _tick(world)
+        world.channel.ops()
+    cursor = _stream()["cursor"]
+    if operation.endswith("delete"):
+        world.feed.withdraw("l1")
+    elif operation.endswith("edit"):
+        world.feed.update("l1", score=25, description="https://example.com/new")
+    else:
+        world.feed.submit(log)
+
+    error = discord.HTTPException(SimpleNamespace(status=503, reason="Unavailable"), "temporary")
+    failing = True
+    send = world.channel.send
+    edit = FakeMessage.edit
+    delete = FakeMessage.delete
+
+    async def flaky_send(content=None, **kwargs):
+        if failing and ((operation == "card_send" and content is None) or
+                        (operation == "links_send" and content is not None)):
+            raise error
+        return await send(content, **kwargs)
+
+    async def flaky_edit(message, **kwargs):
+        if failing and ((operation == "card_edit" and message.id == 1001) or
+                        (operation == "links_edit" and message.id == 1002)):
+            raise error
+        return await edit(message, **kwargs)
+
+    async def flaky_delete(message):
+        if failing and ((operation == "card_delete" and message.id == 1001) or
+                        (operation == "links_delete" and message.id == 1002)):
+            raise error
+        return await delete(message)
+
+    monkeypatch.setattr(world.channel, "send", flaky_send)
+    monkeypatch.setattr(FakeMessage, "edit", flaky_edit)
+    monkeypatch.setattr(FakeMessage, "delete", flaky_delete)
+    if operation == "channel":
+        world.bot.get_channel = lambda cid: None
+        world.bot.fetch_channel.side_effect = error
+
+    await _tick(world)
+    assert _stream()["cursor"] == cursor
+    if operation == "links_send":
+        # The card succeeded: checkpoint it before retrying its failed links send.
+        assert _stream()["messages"]["l1"]["card"] == 1001
+
+    failing = False
+    world.bot.get_channel = lambda cid: world.channel
+    await _tick(world)
+    assert _stream()["cursor"] == world.feed.last_event_id
+    if operation.endswith("delete"):
+        assert world.channel.live == {}
+        assert _stream()["messages"] == {}
+    else:
+        assert len(world.channel.live) == 2
+        assert _stream()["messages"]["l1"] == {"channel_id": CHANNEL, "card": 1001, "links": 1002}
+        card_sends = [entry for entry in world.channel.timeline if entry[0] == "send" and entry[2]["embed"]]
+        assert len(card_sends) <= 1
