@@ -194,7 +194,7 @@ async def _tally_scores_since(
     See ``_logs_in_window`` for how the window is scanned. Returns
     ``{user_id: [display_name, total_score]}``; the display name is taken from
     each user's newest log in the window (the first one counted).
-    ``exclude_backlog`` omits backlog-tagged logs for weekly leaderboards.
+    ``exclude_backlog`` omits backlog-tagged logs for weekly/monthly leaderboards.
     """
     totals: dict[str, list] = {}
     async for log in _logs_in_window(bot, contest_id, cutoff, until):
@@ -505,7 +505,7 @@ async def build_period_leaderboard_card(
     the window in the title; ``window_phrase`` is the prose form used in the footer
     and the shame heading. ``until`` bounds the top of the window (``None`` =
     open-ended up to now).
-    Weekly callers set ``exclude_backlog``; monthly callers keep all log scores.
+    Weekly and monthly leaderboard callers set ``exclude_backlog``.
 
     Returns ``(contest, card)``. ``card`` is ``None`` when nobody logged anything
     in the window, leaving it to the caller to show an "empty" message (the
@@ -854,6 +854,7 @@ class Leaderboard(commands.Cog):
             until=until,
             title_suffix=month_label,
             window_phrase=month_label,
+            exclude_backlog=True,
         )
 
 

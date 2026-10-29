@@ -192,7 +192,7 @@ class Alerts(commands.Cog):
                     until=until,
                     title_suffix=title_suffix,
                     window_phrase=window_phrase,
-                    exclude_backlog=kind == "weekly",
+                    exclude_backlog=True,  # weekly and monthly recaps
                 )
         except tadoku.TadokuAPIError:
             # Transient (or contest gone): don't advance last_period, so we retry.

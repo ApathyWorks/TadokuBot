@@ -45,9 +45,9 @@ reject unauthorized users with an ephemeral message.
 ## Scheduled alerts
 
 Logs tagged `backlog` (case-insensitive) do not contribute points to the daily
-top-logger spotlight or weekly leaderboards, including automatic weekly posts.
-Backlog-only participants are excluded from those rankings; for weekly inactivity
-callouts, they count as having no qualifying logs. Monthly and cumulative/year-end
+top-logger spotlight or weekly/monthly leaderboards, including automatic posts.
+Backlog-only participants are excluded from those rankings; for weekly/monthly
+inactivity callouts, they count as having no qualifying logs. Cumulative/year-end
 standings still include backlog points.
 
 `/alerts on channel:#somewhere` opts a server into four automatic posts (all times **UTC**, which is

@@ -639,15 +639,34 @@ async def test_weekly_command_backlog_only_is_empty(fake_bot):
     assert "No points logged" in interaction.followup.send.await_args.args[0]
 
 
-async def test_monthly_command_keeps_backlog_points(fake_bot):
+@pytest.mark.parametrize("tag", ["backlog", " BackLog ", "BACKLOG"])
+async def test_monthly_command_excludes_backlog_points(fake_bot, tag):
     log = _log("u1", "ruby", 1000, "2026-07-05T12:00:00Z")
-    log["tags"] = ["backlog"]
-    tadoku_client.list_contest_logs.side_effect = _log_pager({0: [log]})
+    log["tags"] = ["book", tag]
+    tadoku_client.list_contest_logs.side_effect = _log_pager({0: [
+        log,
+        _log("u1", "ruby", 5, "2026-07-04T12:00:00Z"),
+        _log("u2", "ryun", 10, "2026-07-03T12:00:00Z"),
+    ]})
     cog = leaderboard_cog.Leaderboard(fake_bot)
     await cog.monthlyleaderboard.callback(
         cog, make_interaction(guild_id=999), month=Choice(name="July", value=7), year=2026
     )
-    assert _rendered_card().entries[0]["score"] == 1000
+    assert [(e["name"], e["score"], e["rank"]) for e in _rendered_card().entries] == [
+        ("ryun", 10, 1), ("ruby", 5, 2),
+    ]
+
+
+async def test_monthly_command_backlog_only_is_empty(fake_bot):
+    log = _log("u1", "ruby", 1000, "2026-07-05T12:00:00Z")
+    log["tags"] = ["backlog"]
+    tadoku_client.list_contest_logs.side_effect = _log_pager({0: [log]})
+    cog = leaderboard_cog.Leaderboard(fake_bot)
+    interaction = make_interaction(guild_id=999)
+    await cog.monthlyleaderboard.callback(
+        cog, interaction, month=Choice(name="July", value=7), year=2026
+    )
+    assert "No points logged" in interaction.followup.send.await_args.args[0]
 
 
 async def test_weekly_command_defers(fake_bot):

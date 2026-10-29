@@ -297,7 +297,7 @@ async def test_maybe_post_monthly_posts_previous_month(patched_card):
     assert bkwargs["cutoff"] == datetime(2026, 6, 1, tzinfo=timezone.utc)
     assert bkwargs["until"] == datetime(2026, 7, 1, tzinfo=timezone.utc)
     assert bkwargs["title_suffix"] == "June 2026"
-    assert bkwargs["exclude_backlog"] is False
+    assert bkwargs["exclude_backlog"] is True
     assert config_store.get_guild_alert(999, "monthly")["last_period"] == [2026, 7]
 
 
