@@ -1,20 +1,22 @@
 """Log-feed cog: the ``/log`` command group and the poller behind it.
 
 ``/log on channel:#x`` (Manage Server) turns on a live feed: every minute the
-bot checks the server's current contest for new logs on tadoku.app and posts each
-one — who logged it, what they logged, and the points — to the chosen channel as
-an embed "card". If the logger has linked their Discord account via ``/claim``,
-the card carries their Discord avatar.
+bot reads the server's current contest's event feed on tadoku.app and keeps the
+chosen channel in line with it. A newly submitted log is posted — who logged
+it, what they logged, and the points — as an embed "card"; an edited log has
+its card edited in place; a withdrawn or deleted log has its card deleted.
 
 If the logger has linked their Discord account via ``/claim``, the log posts as a
 rendered image **profile card** (see ``lib.profile_card``): their Discord avatar,
 their place and score in the current contest (as the card's subtitle), their
 stats for that contest (characters, pages, listening hours — summed live from
 tadoku.app's per-user log history, restricted to the contest's date window), and
-this log. Everyone else gets the plain embed card.
+this log. Everyone else gets the plain embed card. An edit re-renders the whole
+card, so it shows the log's and the logger's current numbers.
 
 Any log whose description contains HTTP(S) URLs gets them posted beneath the
 card as clickable links. NSFW-tagged logs suppress previews on that follow-up.
+The links message follows edits too (sent, edited, or deleted as needed).
 
 After the logs, the poller posts a **"moved up" card** (see ``lib.rank_card``) for
 anyone those logs pushed up the contest's top ``RANK_CALLOUT_DEPTH`` — overtaking
@@ -22,12 +24,17 @@ a rival, or breaking into the slice from below. It compares the live top slice
 against a per-guild snapshot from the previous poll; the first baseline (or a
 change of pinned contest) only seeds the snapshot, so no stale callouts fire.
 
-The poller keeps a per-guild ``last_seen`` high-water mark (the ``created_at`` of
-the newest log already posted) so it never repeats a log or dumps a backlog: on
-enable the mark is seeded to "now", and each poll posts only logs newer than it.
-``_poll_guild`` holds the testable core; the ``tasks.loop`` just drives it.
+Per guild the poller keeps a ``stream`` (see ``config_store.get_guild_logfeed``):
+its cursor in the contest's event feed, and which Discord messages belong to
+which log. Each event fetches its log's *current* state, so the event type only
+decides whether a new post is allowed (a submission) — replaying an event edits
+the card it already posted instead of posting it twice. The cursor is seeded to
+"now" (no backlog dump) and saved after every event, so a restart or a
+tadoku.app failure resumes exactly where it stopped. ``_poll_guild`` holds the
+testable core; the ``tasks.loop`` just drives it.
 """
 
+import functools
 import io
 import logging
 import re
@@ -54,13 +61,14 @@ POLL_INTERVAL_MINUTES = 1
 # Page size for fetching logs (the API caps this at 100).
 LOG_PAGE_SIZE = 100
 
-# Safety cap on pages scanned per guild per poll. At a 1-minute cadence far fewer
-# than 100 new logs arrive, so page 0 almost always suffices; this just bounds a
-# pathological burst / a long outage catch-up.
-LOGFEED_MAX_PAGES = 5
+# Safety cap on event-feed pages (100 events each) read per guild per poll. The
+# cursor is saved after every event, so stopping early loses nothing -- the next
+# poll carries on from there. This just bounds a long outage catch-up (or a feed
+# that keeps answering has_more) so one guild can't stall the poller.
+EVENT_PAGES_PER_POLL = 10
 
-# Most logs to post in a single poll before collapsing the remainder into an
-# "…and N more" trailer, so a burst can't flood the channel.
+# Most new logs to post in a single poll. The cursor stops before the next one,
+# so a burst drains over the following polls instead of flooding the channel.
 MAX_POSTS_PER_POLL = 20
 
 # Safety cap on pages walked when summing a user's log history for the profile
@@ -314,6 +322,10 @@ def _description_urls(log: dict) -> list[str]:
     return urls
 
 
+def _is_nsfw(log: dict) -> bool:
+    return any(str(tag).strip().casefold() == "nsfw" for tag in log.get("tags") or [])
+
+
 def _format_tags(log: dict) -> str:
     """The log's tags as hashtag tokens ("#fiction #game"), or "" if it has none.
 
@@ -407,82 +419,199 @@ class LogFeed(commands.Cog):
                 _log.exception("Log feed poll failed for guild %s", guild_id)
 
     async def _poll_guild(self, guild_id: int) -> None:
-        """Post any logs newer than ``last_seen`` for one guild, then advance it.
+        """Bring one guild's feed channel in line with its contest's new events.
 
-        Pulled out of the loop so tests drive it directly. On a tadoku.app failure
-        we leave ``last_seen`` untouched so the next tick retries the same window.
+        Pulled out of the loop so tests drive it directly. With no stream yet, a
+        stream for a different contest, or a cursor cleared by ``/log on``, this
+        poll only seeds the cursor at "now" and posts nothing. Otherwise it works
+        through the events from the saved cursor (``_apply_events``), then posts
+        any rank-up cards those logs earned.
         """
         settings = config_store.get_guild_logfeed(guild_id)
         if not settings["enabled"] or not settings["channel_id"]:
             return
 
-        last_seen = settings["last_seen"]
-        # Seeded to "now" on enable, so this is only None for legacy/edge cases;
-        # treat a missing mark as "post nothing yet" by seeding to now.
-        if last_seen is None:
-            config_store.set_guild_logfeed(
-                guild_id, last_seen=datetime.now(timezone.utc).isoformat()
-            )
-            return
-        cutoff = leaderboard._parse_timestamp(last_seen)
-
         try:
             contest = await leaderboard._resolve_contest(self.bot, guild_id)
-            new_logs = await self._collect_new_logs(contest["id"], cutoff)
         except tadoku.TadokuAPIError:
             _log.warning("Log feed for guild %s: tadoku.app lookup failed; will retry", guild_id)
             return
 
-        if not new_logs:
+        stream = settings["stream"] or {}
+        same_contest = stream.get("contest_id") == contest["id"]
+        if not same_contest or stream.get("cursor") is None:
+            # A new contest starts with an empty message map; the old contest's
+            # cards stay as they are.
+            messages = stream.get("messages", {}) if same_contest else {}
+            await self._seed_stream(guild_id, contest["id"], messages)
             return
-
-        # ``_collect_new_logs`` returns newest-first; the newest is the new mark.
-        newest_created_at = new_logs[0]["created_at"]
-        # Post oldest -> newest so the channel reads chronologically.
-        to_post = list(reversed(new_logs))
-        overflow = len(to_post) - MAX_POSTS_PER_POLL
-        if overflow > 0:
-            # Keep the most recent ones (the tail of the chronological list).
-            to_post = to_post[-MAX_POSTS_PER_POLL:]
 
         # Claim map for this guild: a claimed logger gets the rendered profile
         # card (avatar + contest stats); everyone else gets the plain embed. The
         # caches memoise per-user avatar/stats lookups across a burst.
         claims = config_store.get_guild_claims(guild_id)
         avatar_cache: dict[int, Optional[bytes]] = {}
-        stats_cache: dict[str, Optional[dict]] = {}
-        poster_cache: dict[tuple, Optional[bytes]] = {}
-        standing_cache: dict[str, str] = {}
-        for log in to_post:
-            message = await self._message_for(
-                log, contest, claims, avatar_cache, stats_cache,
-                poster_cache, standing_cache,
-            )
-            await self._post(settings["channel_id"], **message)
-            # Make links clickable even when the description is drawn in an image.
-            urls = _description_urls(log)
-            if urls:
-                nsfw = any(str(tag).strip().casefold() == "nsfw" for tag in log.get("tags") or [])
-                await self._post(
-                    settings["channel_id"], content="\n".join(urls), suppress_embeds=nsfw
-                )
-        if overflow > 0:
-            await self._post(
-                settings["channel_id"],
-                content=f"…and {overflow} more log(s) in the last few minutes.",
-            )
-
-        # After the logs, spotlight anyone those logs pushed up the leaderboard.
-        await self._post_rank_changes(
-            guild_id, contest, new_logs, settings, claims, avatar_cache
+        render = functools.partial(
+            self._message_for, contest=contest, claims=claims, avatar_cache=avatar_cache,
+            stats_cache={}, poster_cache={}, standing_cache={},
+        )
+        changed = await self._apply_events(
+            guild_id, settings["channel_id"], contest["id"], stream, render
         )
 
-        config_store.set_guild_logfeed(guild_id, last_seen=newest_created_at)
+        # After the logs, spotlight anyone those logs pushed up the leaderboard.
+        await self._post_rank_changes(guild_id, contest, changed, settings, claims, avatar_cache)
+
+    async def _seed_stream(self, guild_id: int, contest_id: str, messages: dict) -> None:
+        """Start following ``contest_id`` from its latest event (no backlog)."""
+        try:
+            page = await tadoku.get_contest_events(self.bot.session, contest_id, cursor="now")
+        except tadoku.TadokuAPIError:
+            _log.warning("Log feed for guild %s: couldn't start the event feed; will retry", guild_id)
+            return
+        config_store.set_guild_logfeed(guild_id, stream={
+            "contest_id": contest_id, "cursor": page["next_cursor"], "messages": messages,
+        })
+
+    async def _apply_events(
+        self, guild_id: int, channel_id: int, contest_id: str, stream: dict, render
+    ) -> list[dict]:
+        """Apply the contest's events after ``stream``'s cursor, in feed order.
+
+        For each event the log's current state decides what happens to its
+        Discord messages (``_sync_log``); only a ``log.submitted`` event may
+        create a post, so updates to logs never posted here (e.g. from before
+        ``/log on``) are skipped without a lookup. The stream -- cursor and
+        message map -- is saved after every event. A Tadoku or Discord error stops
+        right before the failed event, keeping the cursor, so the next poll
+        retries it; a rejected cursor is logged, never reset (that would skip
+        events). Returns the logs whose cards were posted or edited.
+        """
+        messages = stream["messages"]
+        changed: list[dict] = []
+        posted = 0
+        try:
+            for _ in range(EVENT_PAGES_PER_POLL):
+                page = await tadoku.get_contest_events(
+                    self.bot.session, contest_id, cursor=stream["cursor"]
+                )
+                for event in page["events"]:
+                    log_id = event["log_id"]
+                    entry = messages.get(log_id)
+                    if entry is None and event["event"] != "log.submitted":
+                        pass  # nothing posted for this log, and only a submission posts
+                    elif entry is None and posted >= MAX_POSTS_PER_POLL:
+                        return changed  # the rest of the burst waits for the next poll
+                    else:
+                        log = await tadoku.get_contest_log(self.bot.session, contest_id, log_id)
+
+                        def checkpoint(new_entry):
+                            # A card can succeed while its links fail. Save the
+                            # card ID with the OLD cursor so retry edits it.
+                            messages[log_id] = new_entry
+                            config_store.set_guild_logfeed(guild_id, stream=stream)
+
+                        synced = await self._sync_log(channel_id, entry, log, render, checkpoint)
+                        if synced is None:
+                            messages.pop(log_id, None)
+                        else:
+                            if entry is None:
+                                posted += 1
+                            messages[log_id] = synced
+                            changed.append(log)
+                    stream["cursor"] = event["id"]
+                    config_store.set_guild_logfeed(guild_id, stream=stream)
+                if not page["has_more"]:
+                    break
+        except (tadoku.TadokuAPIError, discord.HTTPException) as e:
+            _log.warning("Log feed for guild %s: %s; will retry", guild_id, e)
+        return changed
+
+    async def _sync_log(
+        self, channel_id: int, entry: Optional[dict], log: Optional[dict], render, checkpoint
+    ) -> Optional[dict]:
+        """Make one log's Discord messages match its current state.
+
+        ``log`` is ``None`` when the log isn't in the contest (any more): its
+        messages are deleted. With no ``entry`` yet the log is posted; otherwise
+        its card (and links message) are edited in place. Returns the log's
+        message entry ``{"channel_id", "card", "links"}``, or ``None`` when
+        nothing is posted for it (any more).
+        """
+        if log is None:
+            if entry is not None:
+                await self._delete_log_messages(entry)
+            return None
+        if entry is None:
+            return await self._post_log(channel_id, log, render, checkpoint)
+        return await self._edit_log_messages(entry, log, render)
+
+    async def _post_log(self, channel_id: int, log: dict, render, checkpoint) -> dict:
+        """Post a log's card, plus its description links beneath it."""
+        channel = await self._sync_channel(channel_id)
+        card = await channel.send(None, **await render(log))
+        entry = {"channel_id": channel_id, "card": card.id, "links": None}
+        checkpoint(entry)
+        # Make links clickable even when the description is drawn in an image.
+        links = await self._sync_links(channel, None, log)
+        return {**entry, "links": links}
+
+    async def _edit_log_messages(self, entry: dict, log: dict, render) -> Optional[dict]:
+        """Re-render a posted log's card in place and sync its links message.
+
+        Passing both ``embed`` and ``attachments`` lets a card switch between the
+        plain embed and the image card (e.g. the logger ``/claim``ed since). A
+        card someone deleted by hand takes its links message with it and the log
+        is no longer followed, rather than reposted.
+        """
+        channel = await self._sync_channel(entry["channel_id"])
+        message = await render(log)
+        try:
+            await channel.get_partial_message(entry["card"]).edit(
+                embed=message.get("embed"),
+                attachments=[message["file"]] if "file" in message else [],
+            )
+        except discord.NotFound:
+            await self._delete_log_messages(entry)
+            return None
+        return {**entry, "links": await self._sync_links(channel, entry.get("links"), log)}
+
+    async def _sync_links(self, channel, links_id: Optional[int], log: dict) -> Optional[int]:
+        """Send, edit or delete the links message under a card to match the log's
+        description URLs; return its id (``None`` when there are no links)."""
+        urls = _description_urls(log)
+        if links_id is None:
+            if not urls:
+                return None
+            sent = await channel.send("\n".join(urls), suppress_embeds=_is_nsfw(log))
+            return sent.id
+        try:
+            if not urls:
+                await channel.get_partial_message(links_id).delete()
+                return None
+            # Only a full Message can toggle embed suppression on edit.
+            message = await channel.fetch_message(links_id)
+            await message.edit(content="\n".join(urls), suppress=_is_nsfw(log))
+        except discord.NotFound:
+            return None  # deleted by hand; don't bring it back
+        return links_id
+
+    async def _delete_log_messages(self, entry: dict) -> None:
+        """Delete a log's card and links message (already-gone ones are fine)."""
+        channel = await self._sync_channel(entry["channel_id"])
+        for message_id in (entry["card"], entry.get("links")):
+            if message_id is None:
+                continue
+            try:
+                await channel.get_partial_message(message_id).delete()
+            except discord.NotFound:
+                pass
 
     async def _post_rank_changes(
-        self, guild_id, contest, new_logs, settings, claims, avatar_cache
+        self, guild_id, contest, logs, settings, claims, avatar_cache
     ) -> None:
-        """Post a "moved up" card for anyone this poll's logs pushed up the top slice.
+        """Post a "moved up" card for anyone this poll's posted or edited ``logs``
+        pushed up the top slice.
 
         Compares the contest's current top ``RANK_CALLOUT_DEPTH`` against the
         snapshot kept from the previous poll. A logger from this poll who climbed
@@ -491,7 +620,7 @@ class LogFeed(commands.Cog):
         of pinned contest) only seeds the snapshot, with no callouts. A lookup
         failure is swallowed so a hiccup here never disturbs the log feed itself.
         """
-        logger_ids = {log.get("user_id") for log in new_logs if log.get("user_id")}
+        logger_ids = {log.get("user_id") for log in logs if log.get("user_id")}
         if not logger_ids:
             return
         try:
@@ -676,48 +805,41 @@ class LogFeed(commands.Cog):
         cache[uid] = data
         return data
 
-    async def _collect_new_logs(self, contest_id: str, cutoff: datetime) -> list[dict]:
-        """Return non-deleted logs with ``created_at`` after ``cutoff``, newest-first.
+    async def _sync_channel(self, channel_id: int):
+        """Resolve a sync target; failures must leave its event pending."""
+        return self.bot.get_channel(channel_id) or await self.bot.fetch_channel(channel_id)
 
-        Logs arrive newest-first, so we stop at the first log at/older than the
-        cutoff (everything after is older too) or at a short page, bounded by
-        ``LOGFEED_MAX_PAGES``.
-        """
-        collected: list[dict] = []
-        for page in range(LOGFEED_MAX_PAGES):
-            logs = await tadoku.list_contest_logs(
-                self.bot.session, contest_id, page=page, page_size=LOG_PAGE_SIZE
-            )
-            for log in logs:
-                if leaderboard._parse_timestamp(log["created_at"]) <= cutoff:
-                    return collected  # reached logs we've already seen
-                if not log.get("deleted"):
-                    collected.append(log)
-            if len(logs) < LOG_PAGE_SIZE:
-                break
-        return collected
-
-    async def _post(
-        self,
-        channel_id: int,
-        content: Optional[str] = None,
-        embed: Optional[discord.Embed] = None,
-        file: Optional[discord.File] = None,
-        suppress_embeds: bool = False,
-    ) -> None:
-        """Send a message (text, embed and/or file) to the channel, tolerating a
-        missing/forbidden one."""
+    async def _channel(self, channel_id: int):
+        """Resolve a channel (cache, then a live fetch), or ``None`` if it's gone."""
         channel = self.bot.get_channel(channel_id)
         if channel is None:
             try:
                 channel = await self.bot.fetch_channel(channel_id)
             except discord.HTTPException:
                 _log.warning("Log feed: channel %s not found", channel_id)
-                return
+                return None
+        return channel
+
+    async def _send(
+        self,
+        channel,
+        content: Optional[str] = None,
+        embed: Optional[discord.Embed] = None,
+        file: Optional[discord.File] = None,
+        suppress_embeds: bool = False,
+    ) -> Optional[discord.Message]:
+        """Send a message (text, embed and/or file); ``None`` if Discord refused."""
         try:
-            await channel.send(content, embed=embed, file=file, suppress_embeds=suppress_embeds)
+            return await channel.send(content, embed=embed, file=file, suppress_embeds=suppress_embeds)
         except discord.HTTPException:
-            _log.warning("Log feed: couldn't post to channel %s", channel_id)
+            _log.warning("Log feed: couldn't post to channel %s", channel.id)
+            return None
+
+    async def _post(self, channel_id: int, **message) -> None:
+        """Send a message to the channel, tolerating a missing/forbidden one."""
+        channel = await self._channel(channel_id)
+        if channel is not None:
+            await self._send(channel, **message)
 
     # -- commands -----------------------------------------------------------
 
@@ -743,16 +865,18 @@ class LogFeed(commands.Cog):
                 ephemeral=True,
             )
             return
-        # Seed the mark to now so only logs from here on are posted (no backlog).
-        config_store.set_guild_logfeed(
-            interaction.guild_id,
-            enabled=True,
-            channel_id=target.id,
-            last_seen=datetime.now(timezone.utc).isoformat(),
-        )
+        settings = config_store.get_guild_logfeed(interaction.guild_id)
+        fields = {"enabled": True, "channel_id": target.id}
+        if not settings["enabled"] and settings["stream"]:
+            # Back on after a pause: the next poll restarts from "now" (no backlog
+            # dump) but keeps the message map, so cards already posted still follow
+            # their logs. Already on (e.g. moving channels): keep its place.
+            fields["stream"] = {**settings["stream"], "cursor": None}
+        config_store.set_guild_logfeed(interaction.guild_id, **fields)
         await interaction.response.send_message(
             f"✅ Live log feed is **on** in {target.mention}. New logs in this server's contest "
-            f"will appear here within about a minute.",
+            f"will appear here within about a minute, and edits or deletions on tadoku.app "
+            f"update their cards.",
             ephemeral=True,
         )
 

@@ -230,7 +230,7 @@ def guilds_with_alerts() -> list[int]:
 # Live log feed (the /log command)
 # ---------------------------------------------------------------------------
 
-_LOGFEED_FIELDS = {"enabled", "channel_id", "last_seen", "rank_snapshot"}
+_LOGFEED_FIELDS = {"enabled", "channel_id", "rank_snapshot", "stream"}
 
 
 def get_guild_logfeed(guild_id: int) -> dict:
@@ -238,31 +238,45 @@ def get_guild_logfeed(guild_id: int) -> dict:
 
       * ``enabled``    -- whether the feed posts new logs automatically (default False).
       * ``channel_id`` -- the channel to post logs in (int), or ``None`` if unset.
-      * ``last_seen``  -- the ``created_at`` of the newest log already posted (an
-        ISO-8601 string), or ``None`` if never. The poller posts only logs newer
-        than this, so it never repeats or dumps a backlog.
       * ``rank_snapshot`` -- the last-seen leaderboard positions, used to detect
         rank-change callouts: ``{"contest_id": id, "ranks": {user_id: rank}}`` for
         the top slice, or ``None`` if never captured (or the pinned contest changed).
+      * ``stream`` -- where the poller is in the contest's event feed, and which
+        Discord messages it posted for which logs, or ``None`` if never seeded::
+
+            {"contest_id": id,
+             "cursor": event_id_or_None,      # None: reseed to "now" next poll
+             "messages": {log_id: {"channel_id": int, "card": message_id,
+                                   "links": message_id_or_None}}}
+
+        ``messages`` lets a later event edit or delete the post for its log.
+
+    Configs written before the event feed may still carry a ``last_seen``
+    timestamp; it's ignored, and the next poll seeds a stream instead.
     """
     entry = _read().get(str(guild_id)) or {}
     settings = entry.get("logfeed") or {}
     return {
         "enabled": settings.get("enabled", False),
         "channel_id": settings.get("channel_id"),
-        "last_seen": settings.get("last_seen"),
         "rank_snapshot": settings.get("rank_snapshot"),
+        "stream": settings.get("stream"),
     }
 
 
 def set_guild_logfeed(guild_id: int, **fields) -> None:
     """Update some of a guild's log-feed settings, leaving the rest as-is.
 
-    Accepts any of ``enabled`` / ``channel_id`` / ``last_seen`` / ``rank_snapshot``
+    Accepts any of ``enabled`` / ``channel_id`` / ``rank_snapshot`` / ``stream``
     and merges them into the stored settings, preserving the guild's other keys
-    (contest, shame, alerts). This partial shape lets the poller bump only
-    ``last_seen`` / ``rank_snapshot`` without touching the admin's
+    (contest, shame, alerts). This partial shape lets the poller save only
+    ``stream`` / ``rank_snapshot`` without touching the admin's
     ``enabled``/``channel_id`` choices.
+
+    ponytail: the whole file is rewritten on every save and ``stream.messages``
+    grows by one entry per posted log until the contest changes (~90 bytes each,
+    ~0.5 MB at 5,000 logs). Move the map to sqlite3, or prune entries by message
+    snowflake age, if config.json reaches a few MB.
     """
     unknown = set(fields) - _LOGFEED_FIELDS
     if unknown:

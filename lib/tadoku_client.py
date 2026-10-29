@@ -50,8 +50,14 @@ class TadokuAPIError(Exception):
     """Raised for any non-200 response or network failure talking to tadoku.app.
 
     Cogs catch this single type to show a friendly "couldn't reach tadoku.app"
-    message instead of leaking a raw traceback to the user.
+    message instead of leaking a raw traceback to the user. ``status`` is the
+    HTTP status for a non-200 response, or ``None`` for a transport or login
+    failure, so a caller can tell "not found" apart from an outage.
     """
+
+    def __init__(self, message: str, status: int | None = None) -> None:
+        super().__init__(message)
+        self.status = status
 
 
 def _stringify_query_value(value):
@@ -127,7 +133,7 @@ async def _get(session: aiohttp.ClientSession, path: str, params: dict | None = 
     # The API returns 200 on success and 404 for unknown contests/paths; treat
     # anything other than 200 as an error the caller must handle.
     if status != 200:
-        raise TadokuAPIError(f"tadoku.app returned {status} for {path}")
+        raise TadokuAPIError(f"tadoku.app returned {status} for {path}", status=status)
     return body
 
 
@@ -249,3 +255,45 @@ async def list_user_logs(
         f"/users/{user_id}/logs",
         {"page": page, "page_size": page_size},
     )
+
+
+async def get_contest_events(
+    session: aiohttp.ClientSession,
+    contest_id: str,
+    *,
+    cursor: str,
+    limit: int = 100,
+) -> dict:
+    """Fetch one page of a contest's log event feed, oldest first.
+
+    ``cursor`` is an event id from a previous page, ``"now"`` (an empty page
+    whose ``next_cursor`` is the latest event) or ``"0"`` (from the start).
+    Returns ``{"events": [...], "next_cursor": id, "has_more": bool}``; each
+    event has ``id``, ``log_id``, ``event`` (``log.submitted`` /
+    ``log.updated`` / ``log.withdrawn``) and ``occurred_at``. A bad or
+    wrong-contest cursor raises with ``status == 400``.
+    """
+    return await _get(
+        session,
+        f"/contests/{contest_id}/events",
+        {"cursor": cursor, "limit": limit},
+    )
+
+
+async def get_contest_log(
+    session: aiohttp.ClientSession, contest_id: str, log_id: str
+) -> dict | None:
+    """Fetch a log's current state as it appears in ``contest_id``.
+
+    Same shape as an item of ``list_contest_logs``, with the score this
+    contest gives it. Returns ``None`` when the log isn't in the contest (any
+    more): withdrawn, deleted, or removed by a moderator. Every other failure
+    still raises, so an outage or a permission error never looks like a
+    withdrawal.
+    """
+    try:
+        return await _get(session, f"/contests/{contest_id}/logs/{log_id}")
+    except TadokuAPIError as e:
+        if e.status == 404:
+            return None
+        raise

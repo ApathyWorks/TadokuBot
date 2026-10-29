@@ -78,15 +78,18 @@ class FakeTadokuAPI:
         # and query string the client produced.
         self.requests: list[tuple[str, dict]] = []
 
-    def set_response(self, path: str, status: int, body: object) -> None:
-        """Register what to return for a given request path."""
-        self.responses[path] = (status, body)
+    def set_response(self, path: str, status, body: object = None) -> None:
+        """Register what to return for a given request path: a fixed
+        ``(status, body)``, or a callable ``query -> (status, body)`` passed as
+        ``status`` for responses that depend on the query (e.g. a cursor)."""
+        self.responses[path] = status if callable(status) else (status, body)
 
     async def _handler(self, request: web.Request) -> web.Response:
         """Single catch-all handler: record the request, reply with the canned
         response for its path (or a 404 if none was registered)."""
         self.requests.append((request.path, dict(request.query)))
-        status, body = self.responses.get(request.path, (404, {"error": "not found"}))
+        response = self.responses.get(request.path, (404, {"error": "not found"}))
+        status, body = response(dict(request.query)) if callable(response) else response
         return web.json_response(body, status=status)
 
 
